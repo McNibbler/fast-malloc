@@ -177,7 +177,7 @@ void* xmalloc(size_t const _bytes)
 
 int coelesceable(memblock* prev,memblock* next,size_t class_index)
 {
-	return (size_t)prev^(size_t)next==(size_t)1<<class_index+4;
+	return ((size_t)prev^(size_t)next)==((size_t)1<<(class_index+4));
 }
 
 static void insert_block(size_t arena_number,size_t class_index,memblock* block)
