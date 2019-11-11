@@ -12,16 +12,17 @@ LDLIBS := -lpthread
 
 all: $(BINS)
 
+
 collatz-list-sys: list_main.o sys_malloc.o
 	gcc $(CFLAGS) -o $@ $^ $(LDLIBS)
 
 collatz-ivec-sys: ivec_main.o sys_malloc.o
 	gcc $(CFLAGS) -o $@ $^ $(LDLIBS)
 
-collatz-list-hw7: list_main.o hw07_malloc.o hmem.o
+collatz-list-hw7: list_main.o hw07_malloc.o
 	gcc $(CFLAGS) -o $@ $^ $(LDLIBS)
 
-collatz-ivec-hw7: ivec_main.o hw07_malloc.o hmem.o
+collatz-ivec-hw7: ivec_main.o hw07_malloc.o
 	gcc $(CFLAGS) -o $@ $^ $(LDLIBS)
 
 collatz-list-par: list_main.o par_malloc.o

@@ -59,14 +59,14 @@ static size_t _Atomic current_arena=0;
 
 static arena arenas[ARENA_COUNT];
 
-static size_t log2(size_t x)
+static size_t log_2(size_t x)
 {
 	return 63-__builtin_clzll(x);
 }
 
 static size_t class_index(size_t bytes)
 {
-	return log2(bytes-1)-4;
+	return log_2(bytes-1)-4;
 }
 
 static size_t div_up(size_t xx,size_t yy)
@@ -76,7 +76,7 @@ static size_t div_up(size_t xx,size_t yy)
 
 static size_t floor2(size_t x)
 {
-	return ((size_t)1)<<log2(x);
+	return ((size_t)1)<<log_2(x);
 }
 
 static size_t fix_size(size_t size)
@@ -85,7 +85,7 @@ static size_t fix_size(size_t size)
 	{
 		return 16;
 	}
-	return ((size_t)(1))<<(log2(size-1)+1);
+	return ((size_t)(1))<<(log_2(size-1)+1);
 }
 
 void insert_block_no_coelesce(size_t arena_index,size_t class_index,memblock* block)
@@ -136,7 +136,7 @@ size_t get_arena_number()
 	return arena_number;
 }
 
-void* malloc(size_t const _bytes)
+void* xmalloc(size_t const _bytes)
 {
 	if(_bytes==0)
 	{
@@ -154,7 +154,7 @@ void* malloc(size_t const _bytes)
 	size_t const index=class_index(bytes);
 	for(size_t i=index;i<CLASS_SIZE_COUNT;++i)
 	{
-		memblock* chunk=arenas[arena_number].buckets;
+		memblock* chunk=arenas[arena_number].buckets[i];
 		if(chunk)
 		{
 			size_t const class_size=class_sizes[i];
@@ -282,7 +282,7 @@ void* xrealloc(void* prev,size_t bytes)
 	{
 		memblock* start=(memblock*)((char*)prev-offsetof(memblock,data));
 		size_t const size=start->size;
-		if(start<bytes)
+		if(size<bytes)
 		{
 			return prev;
 		}

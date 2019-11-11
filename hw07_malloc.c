@@ -5,6 +5,7 @@
 #include <pthread.h>
 #include "xmalloc.h"
 #include <pthread.h>
+#include <string.h>
 
 typedef struct memblock {
 	size_t size;
