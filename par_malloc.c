@@ -4,7 +4,6 @@
 #include <sys/mman.h>
 #include <stdint.h>
 #include <stdatomic.h>
-#include <threads.h>
 #include <string.h>
 #include "xmalloc.h"
 
@@ -128,7 +127,7 @@ void insert_block_no_coelesce(size_t arena_index,size_t class_index,memblock* bl
 
 size_t get_arena_number()
 {
-	static thread_local size_t arena_number=-1;
+	static __thread size_t arena_number=-1;
 	if(arena_number==-1)
 	{
 		arena_number=atomic_fetch_add_explicit(&current_arena,1,memory_order_relaxed)%ARENA_COUNT;
