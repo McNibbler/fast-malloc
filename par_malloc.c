@@ -1,71 +1,33 @@
+
 #include <stdlib.h>
-#include <unistd.h>
-#include <stddef.h>
 #include <sys/mman.h>
-#include <stdint.h>
+#include <stdio.h>
+#include <pthread.h>
+#include "xmalloc.h"
+#include <pthread.h>
 #include <stdatomic.h>
 #include <string.h>
-#include "xmalloc.h"
-
-uint32_t const class_sizes[]={
-	0x0010,
-	0x0020,
-	0x0040,
-	0x0080,
-	0x0100,
-	0x0200,
-	0x0400,
-	0x0800,
-	0x1000
-};
-
-enum constants {
-	CLASS_SIZE_COUNT=9,
-	ARENA_COUNT=4
-};
-
-static size_t const BIG_LIMIT=0x10000;
 
 typedef struct memblock {
+	size_t size;
 	union {
-		struct {
-			size_t size;
-			char data[1];
-		};
-		struct {
-			struct memblock* prev;
-			struct memblock* next;
-		};
+		struct memblock* next;
+		char data[1];
 	};
 } memblock,free_list;
 
-void spinlock_lock(atomic_flag volatile* flag)
+size_t const PAGE_SIZE=4096;
+size_t const MIN_ALLOC_SIZE=2*sizeof(size_t);
+static free_list list={0,{0}};
+static atomic_flag list_mutex=ATOMIC_FLAG_INIT;
+static void spinlock_lock(atomic_flag* flag)
 {
 	while(atomic_flag_test_and_set(flag));
 }
 
-void spinlock_unlock(atomic_flag volatile* flag)
+static void spinlock_unlock(atomic_flag* flag)
 {
 	atomic_flag_clear(flag);
-}
-
-typedef struct arena {
-	atomic_flag lock;
-	free_list* buckets[CLASS_SIZE_COUNT];
-} arena;
-
-static size_t _Atomic current_arena=0;
-
-static arena arenas[ARENA_COUNT];
-
-static size_t log_2(size_t x)
-{
-	return 63-__builtin_clzll(x);
-}
-
-static size_t class_index(size_t bytes)
-{
-	return log_2(bytes-1)-4;
 }
 
 static size_t div_up(size_t xx,size_t yy)
@@ -73,226 +35,188 @@ static size_t div_up(size_t xx,size_t yy)
 	return (xx+yy-1)/yy;
 }
 
-static size_t floor2(size_t x)
+static memblock* map_block(size_t size)
 {
-	return ((size_t)1)<<log_2(x);
+	memblock* ret=mmap(0,size,PROT_READ|PROT_WRITE,MAP_ANONYMOUS|MAP_PRIVATE,-1,0);
+	ret->size=size;
+	return ret;
+}
+
+static memblock* next_block(memblock const* bl)
+{
+	return (memblock*)(((char*)bl)+bl->size);
+}
+
+static int coelescable(memblock const* a,memblock const* b)
+{
+	return (next_block(a)==b);
+	//&&((size_t)a/PAGE_SIZE==(size_t)b/PAGE_SIZE);
+}
+
+static void insert_block_nonempty(memblock* block)
+{
+	/*puts(__FUNCTION__);
+	printf("%x %x %ld\n",block,(void*)block->size,block->size);
+	for(free_list* head=list.next;head;head=head->next)
+	{
+		printf("%x %x %ld %x\n",head,(void*)head->size,head->size,head->next);
+	}*/
+
+	free_list* prev=&list;
+	free_list* head=list.next;
+	for(;head;prev=head,head=head->next)
+	{
+		if(block<head)
+		{
+			if(coelescable(block,head))
+			{
+				size_t const combined_size=block->size+head->size;
+				//printf("combined size %ld\n",combined_size);
+				if(coelescable(prev,block))
+				{
+					prev->size+=combined_size;
+					prev->next=head->next;
+				}
+				else
+				{
+					block->next=head->next;
+					block->size=combined_size;
+					prev->next=block;
+				}
+			}
+			else if(coelescable(prev,block))
+			{
+				prev->size+=block->size;
+			}
+			else
+			{
+				prev->next=block;
+				block->next=head;
+			}
+			return;
+		}
+	}
+	if(coelescable(prev,block))
+	{
+		prev->size+=block->size;
+	}
+	else
+	{
+		prev->next=block;
+		block->next=head;
+	}
 }
 
 static size_t fix_size(size_t size)
 {
-	if(size<16)
+	if(size<MIN_ALLOC_SIZE-sizeof(size_t))
 	{
-		return 16;
+		return MIN_ALLOC_SIZE;
 	}
-	return ((size_t)(1))<<(log_2(size-1)+1);
+	return div_up(size+sizeof(size_t),sizeof(size_t))*sizeof(size_t);
 }
 
-void insert_block_no_coelesce(size_t arena_index,size_t class_index,memblock* block)
+void* xmalloc(size_t _size)
 {
-	free_list* head=arenas[arena_index].buckets[class_index];
-	if(head)
+	/*puts(__FUNCTION__);
+	printf("Requested: %ld\n",_size);
+	for(free_list* head=list.next;head;head=head->next)
 	{
-		if(block<head)
-		{
-			arenas[arena_index].buckets[class_index]=block;
-			block->next=head;
-			block->prev=0;
-			head->prev=block;
-		}
-		else
-		{
-			while(head->next)
-			{
-				if(block<head->next)
-				{
-					block->next=head->next;
-					head->next=block;
-					block->prev=head;
-					return;
-				}
-				head=head->next;
-			}
-			head->next=block;
-			block->prev=head;
-			block->next=0;
-		}
+		printf("%x %x %ld\n",head,(void*)head->size,head->size);
+	}*/
+
+	size_t const size=fix_size(_size);
+
+	if(size>=PAGE_SIZE)
+	{
+		//printf("big %ld\n",size);
+		memblock* block=map_block(size);
+		return block->data;
 	}
 	else
 	{
-		arenas[arena_index].buckets[class_index]=block;
-		block->prev=0;
-		block->next=0;
-	}
-}
-
-size_t get_arena_number()
-{
-	static __thread size_t arena_number=-1;
-	if(arena_number==-1)
-	{
-		arena_number=atomic_fetch_add_explicit(&current_arena,1,memory_order_relaxed)%ARENA_COUNT;
-	}
-	return arena_number;
-}
-
-void* xmalloc(size_t const _bytes)
-{
-	if(_bytes==0)
-	{
-		return 0;
-	}
-	size_t const bytes=fix_size(_bytes);
-	if(bytes>=BIG_LIMIT)
-	{
-		size_t* ret=mmap(0,bytes,PROT_READ|PROT_WRITE,MAP_PRIVATE|MAP_ANONYMOUS,-1,0);
-		*ret=bytes;
-		return ret+1;
-	}
-	size_t const arena_number=get_arena_number();
-	spinlock_lock(&arenas[arena_number].lock);
-	size_t const index=class_index(bytes);
-	for(size_t i=index;i<CLASS_SIZE_COUNT;++i)
-	{
-		memblock* chunk=arenas[arena_number].buckets[i];
-		if(chunk)
+		spinlock_lock(&list_mutex);
+		free_list* prev=&list;
+		for(free_list* head=list.next;head;prev=head,head=head->next)
 		{
-			size_t const class_size=class_sizes[i];
-			size_t remaining=class_size-bytes;
-			memblock* remaining_chunk=(memblock*)((char*)chunk+class_size);
-			while(remaining>0)
+			size_t const block_size=head->size;
+			if(block_size>=size)
 			{
-				size_t const subclass_size=floor2(remaining);
-				size_t const current_chunk_offset=remaining-subclass_size;
-				size_t const index=class_index(subclass_size);
-				memblock* to_insert=(memblock*)((char*)remaining_chunk+current_chunk_offset);
-				insert_block_no_coelesce(arena_number,index,to_insert);
-				remaining-=current_chunk_offset;
-			}
-			spinlock_unlock(&arenas[arena_number].lock);
-			chunk->size=class_size;
-			return chunk->data;
-		}
-	}
-}
-
-int coelesceable(memblock* prev,memblock* next,size_t class_index)
-{
-	return ((size_t)prev^(size_t)next)==((size_t)1<<(class_index+4));
-}
-
-static void insert_block(size_t arena_number,size_t class_index,memblock* block)
-{
-	if(class_index+1>=CLASS_SIZE_COUNT)
-	{
-		return insert_block_no_coelesce(arena_number,class_index,block);
-	}
-	free_list* head=arenas[arena_number].buckets[class_index];
-	if(head)
-	{
-		if(block<head)
-		{
-			if(coelesceable(block,head,class_index))
-			{
-				arenas[arena_number].buckets[class_index]=head->next;
-				if(head->next)
+				void* ret=head->data;
+				size_t const remaining_size=block_size-size;
+				if(remaining_size<MIN_ALLOC_SIZE)
 				{
-					head->next->prev=0;
-				}
-				return insert_block(arena_number,class_index+1,block);
-			}
-		}
-		else
-		{
-			while(head->next)
-			{
-				if(block<head->next)
-				{
-					if(coelesceable(block,head->next,class_index))
-					{
-						head->next=head->next->next;
-						if(head->next->next)
-						{
-							head->next->next->prev=head;
-						}
-						return insert_block(arena_number,class_index+1,block);
-					}
-					else
-					{
-						block->next=head->next;
-						block->next->prev=block;
-						head->next=block;
-						block->prev=head;
-						return;
-					}
-				}
-				head=head->next;
-			}
-			if(coelesceable(head,block,class_index))
-			{
-				if(head->prev)
-				{
-					head->prev->next=head->next;
+					prev->next=head->next;
 				}
 				else
 				{
-					arenas[arena_number].buckets[class_index]=head->next;
+					free_list* next=head->next;
+					head->size=size;
+					head=next_block(head);
+					head->size=remaining_size;
+					head->next=next;
+					prev->next=head;
 				}
-				return insert_block(arena_number,class_index+1,head);
-			}
-			else
-			{
-				block->next=0;
-				block->prev=head;
-				head->next=block;
+				spinlock_unlock(&list_mutex);
+				return ret;
 			}
 		}
-	}
-	else
-	{
-		arenas[arena_number].buckets[class_index]=block;
-		block->next=0;
-		block->prev=0;
-	}
-}
-
-void xfree(void* ptr)
-{
-	if(ptr)
-	{
-		memblock* start=(memblock*)((char*)ptr-offsetof(memblock,data));
-		size_t const size=start->size;
-		if(size>=BIG_LIMIT)
+		memblock* block=map_block(size);
+		size_t const remaining_size=PAGE_SIZE-size;
+		if(remaining_size>=MIN_ALLOC_SIZE)
 		{
-			munmap(start,size);
-		}
-		else {
-			size_t const arena_number=get_arena_number();
-			spinlock_lock(&arenas[arena_number].lock);
-			size_t const index=class_index(size);
-			insert_block(arena_number,index,start);
-			spinlock_unlock(&arenas[arena_number].lock);
-		}
-	}
-}
-
-void* xrealloc(void* prev,size_t bytes)
-{
-	if(prev)
-	{
-		memblock* start=(memblock*)((char*)prev-offsetof(memblock,data));
-		size_t const size=start->size;
-		if(size<bytes)
-		{
-			return prev;
+			memblock* rest=next_block(block);
+			rest->size=remaining_size;
+			insert_block_nonempty(rest);
 		}
 		else
 		{
-			void* ret=xmalloc(bytes);
-			memcpy(ret,prev,size);
-			xfree(prev);
-			return ret;
+			block->size=PAGE_SIZE;
 		}
+		spinlock_unlock(&list_mutex);
+		return block->data;
 	}
-	return 0;
+}
+
+void
+xfree(void* item)
+{
+
+	memblock* block=(memblock*)((char*)item-sizeof(size_t));
+	size_t const size=block->size;
+	//printf("size free %ld\n",size);
+	if(size>PAGE_SIZE)
+	{
+		munmap(block,size);
+	}
+	else
+	{
+		spinlock_lock(&list_mutex);
+		insert_block_nonempty(block);
+		spinlock_unlock(&list_mutex);
+	}
+}
+
+void*
+xrealloc(void* item,size_t _size)
+{
+	if(item==0)
+	{
+		return xmalloc(_size);
+	}
+	size_t const size=fix_size(_size);
+	memblock* block=(memblock*)((char*)item-sizeof(size_t));
+	size_t const block_size=block->size;
+	if(block_size>=size)
+	{
+		return item;
+	}
+	else
+	{
+		void* data=xmalloc(_size);
+		memcpy(data,item,block_size-sizeof(size_t));
+		xfree(item);
+		return data;
+	}
 }
 
