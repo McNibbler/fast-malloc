@@ -26,13 +26,13 @@ void* xmalloc(size_t bytes)
 
 void xfree(void* ptr){}
 
-void xrealloc(void* v,size_t bytes)
+void* xrealloc(void* v,size_t bytes)
 {
 	if(v)
 	{
 		size_t const size=*((size_t*)v-1);
 		void* ret=xmalloc(bytes);
-		memcpy(ret,v,ret);
+		memcpy(ret,v,size);
 		return ret;
 	}
 	else
