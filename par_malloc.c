@@ -18,8 +18,11 @@ typedef struct memblock {
 
 size_t const PAGE_SIZE=4096;
 size_t const MIN_ALLOC_SIZE=2*sizeof(size_t);
-static free_list list={0,{0}};
+static free_list list_arenas[8];
+static size_t _Atomic current_arena_number=0;
 static atomic_flag list_mutex=ATOMIC_FLAG_INIT;
+
+
 static void spinlock_lock(atomic_flag* flag)
 {
 	while(atomic_flag_test_and_set(flag));
@@ -53,6 +56,21 @@ static int coelescable(memblock const* a,memblock const* b)
 	//&&((size_t)a/PAGE_SIZE==(size_t)b/PAGE_SIZE);
 }
 
+static size_t get_arena_number()
+{
+	static __thread size_t arena_number=-1;
+	if(arena_number==-1)
+	{
+		arena_number=atomic_fetch_add(&current_arena_number,1);
+	}
+	return arena_number;
+}
+
+static free_list* get_arena()
+{
+	return list_arenas+get_arena_number();
+}
+
 static void insert_block_nonempty(memblock* block)
 {
 	/*puts(__FUNCTION__);
@@ -62,8 +80,8 @@ static void insert_block_nonempty(memblock* block)
 		printf("%x %x %ld %x\n",head,(void*)head->size,head->size,head->next);
 	}*/
 
-	free_list* prev=&list;
-	free_list* head=list.next;
+	free_list* prev=get_arena();
+	free_list* head=prev->next;
 	for(;head;prev=head,head=head->next)
 	{
 		if(block<head)
@@ -136,8 +154,8 @@ void* xmalloc(size_t _size)
 	else
 	{
 		spinlock_lock(&list_mutex);
-		free_list* prev=&list;
-		for(free_list* head=list.next;head;prev=head,head=head->next)
+		free_list* prev=get_arena();
+		for(free_list* head=prev->next;head;prev=head,head=head->next)
 		{
 			size_t const block_size=head->size;
 			if(block_size>=size)
