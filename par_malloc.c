@@ -31,8 +31,13 @@ static size_t div_up(size_t xx,size_t yy)
 typedef struct free_list_node {
 	size_t size;
 	struct free_list_node* next;
-	//struct free_list_node* prev;
 } free_list_node;
+
+typedef struct memblock {
+	size_t size;
+	size_t _padding;
+	char data[];
+} memblock;
 
 typedef struct local_reserve {
 	size_t cache_size;
@@ -56,12 +61,6 @@ typedef struct reserve_list {
 	local_reserve* list;
 	struct reserve_list* _Atomic next;
 } reserve_list;
-
-typedef struct memblock {
-	size_t size;
-	size_t _padding;
-	char data[];
-} memblock;
 
 static reserve_list* _Atomic free_lists;
 
@@ -98,12 +97,45 @@ static int coelescable(free_list_node const* a,free_list_node const* b)
 }
 
 enum constants {
-	PAGE_SIZE=4096
+	PAGE_SIZE=4096,
+	MIN_ALLOC_SIZE=32
 };
 
 static int page_aligned(void* addr)
 {
 	return (((size_t)addr)%PAGE_SIZE)==0;
+}
+
+static free_list_node* merge_free_lists(free_list_node* a,free_list_node* b)
+{
+	free_list_node* ret=0;
+	free_list_node** prev=&ret;
+	while(1)
+	{
+		if(b==0)
+		{
+			*prev=a;
+			break;
+		}
+		if(a==0)
+		{
+			*prev=b;
+			break;
+		}
+		if(a->size>b->size)
+		{
+			*prev=a;
+			prev=&a->next;
+			a=a->next;
+		}
+		else
+		{
+			*prev=b;
+			prev=&b->next;
+			b=b->next;
+		}
+	}
+	return ret;
 }
 
 static free_list_node* sort_free_list(free_list_node* head)
@@ -136,34 +168,7 @@ static free_list_node* sort_free_list(free_list_node* head)
 	before_second_half->next=0;
 	second_half=sort_free_list(second_half);
 	head=sort_free_list(head);
-	free_list_node* ret=0;
-	free_list_node** prev=&ret;
-	while(1)
-	{
-		if(second_half==0)
-		{
-			*prev=head;
-			break;
-		}
-		if(head==0)
-		{
-			*prev=second_half;
-			break;
-		}
-		if(head->size>second_half->size)
-		{
-			*prev=head;
-			prev=&head->next;
-			head=head->next;
-		}
-		else
-		{
-			*prev=second_half;
-			prev=&second_half->next;
-			second_half=second_half->next;
-		}
-	}
-	return ret;
+	return merge_free_lists(head,second_half);
 }
 
 static void* cleanup(void* _)
@@ -179,12 +184,14 @@ static void* cleanup(void* _)
 		atomic_store_explicit(&awakenings,0,memory_order_release);
 		for(reserve_list* fll=atomic_load(&free_lists);fll;fll=fll->next)
 		{
-			local_reserve* list=fll->list;
 			free_list_node* to_insert;
-			spinlock_lock(&list->queue_lock);
-			to_insert=list->queue;
-			list->queue=0;
-			spinlock_unlock(&list->queue_lock);
+			{
+				local_reserve* list=fll->list;
+				spinlock_lock(&list->queue_lock);
+				to_insert=list->queue;
+				list->queue=0;
+				spinlock_unlock(&list->queue_lock);
+			}
 			while(to_insert)
 			{
 				free_list_node* next=to_insert->next;
@@ -311,6 +318,11 @@ static local_reserve* get_reserve()
 	return &fl;
 }
 
+static size_t fix_size(size_t _bytes)
+{
+	return div_up(_bytes+16,16)*16;
+}
+
 void* xmalloc(size_t _bytes)
 {
 	if(unlikely(_bytes==0))
@@ -328,7 +340,7 @@ void* xmalloc(size_t _bytes)
 	}
 	static __thread char* data=0;
 	static __thread char* data_end=0;
-	size_t const needed=div_up(_bytes+16,16)*16;
+	size_t const needed=fix_size(_bytes);
 	local_reserve* reserve=get_reserve();
 	if(reserve->cache)
 	{
@@ -336,9 +348,11 @@ void* xmalloc(size_t _bytes)
 		size_t const el_size=el->size;
 		if(needed<=el_size)
 		{
+			//printf("Taking from cache\n");
 			free_list_node* next=el->next;
 			memblock* ret=(memblock*)el;
-			if(needed==el_size)
+			size_t const remaining=el_size-needed;
+			if(remaining<MIN_ALLOC_SIZE)
 			{
 				reserve->cache=next;
 				if(next==0)
@@ -348,11 +362,18 @@ void* xmalloc(size_t _bytes)
 			}
 			else
 			{
-				size_t const remaining=el_size-needed;
 				free_list_node* new_node=(free_list_node*)((char*)el+needed);
 				new_node->next=0;
 				new_node->size=remaining;
-				(*reserve->cache_end)=new_node;
+				if(next==0)
+				{
+					reserve->cache=new_node;
+				}
+				else
+				{
+					(*reserve->cache_end)=new_node;
+					reserve->cache=next;
+				}
 				reserve->cache_end=&new_node->next;
 			}
 			ret->size=needed;
@@ -368,8 +389,9 @@ void* xmalloc(size_t _bytes)
 		{
 			global_heap=head->next;
 			spinlock_unlock(&heap_lock);
+			//printf("Taking from global heap\n");
 			size_t const remaining=head->size-needed;
-			if(remaining==0)
+			if(remaining<MIN_ALLOC_SIZE)
 			{
 				memblock* ret=(memblock*)head;
 				return ret->data;
@@ -380,6 +402,7 @@ void* xmalloc(size_t _bytes)
 				ret->size=needed;
 				free_list_node* left=(free_list_node*)((char*)head+needed);
 				left->size=remaining;
+				reserve->cache_size+=remaining;
 				if(reserve->cache==0)
 				{
 					reserve->cache=left;
@@ -405,6 +428,7 @@ void* xmalloc(size_t _bytes)
 			}
 		}
 		spinlock_unlock(&heap_lock);
+		//printf("Reallocing data\n");
 		if(data)
 		{
 			char* last=(char*)(div_up((size_t)data,PAGE_SIZE)*PAGE_SIZE);
@@ -414,6 +438,10 @@ void* xmalloc(size_t _bytes)
 		size_t const to_alloc=block_size>needed?block_size:needed;
 		data=mmap(0,to_alloc,PROT_READ|PROT_WRITE,MAP_ANONYMOUS|MAP_PRIVATE,-1,0);
 		data_end=data+to_alloc;
+	}
+	else
+	{
+		//printf("Taking from data\n");
 	}
 	memblock* ret=(memblock*)data;
 	ret->size=needed;
@@ -425,8 +453,8 @@ void xfree(void* ptr)
 {
 	if(likely(ptr))
 	{
-		free_list_node* start=(free_list_node*)((char*)ptr-16);
-		memblock* block=(memblock*)start;
+		size_t const offset=offsetof(memblock,data);
+		free_list_node* start=(free_list_node*)((char*)ptr-offset);
 		// put memory on thread local cache
 		// memory is more likely to be larger than previous allocations or the same size
 		// so putting it on the front is a good guess
@@ -460,8 +488,8 @@ void* xrealloc(void* v,size_t bytes)
 	if(likely(v))
 	{
 		size_t const size=*((size_t*)v-2);
-		size_t const needed=div_up(bytes+16,16)*16;
-		if(needed>size)
+		size_t const needed=fix_size(bytes);
+		if(likely(needed>size))
 		{
 			void* ret=xmalloc(bytes);
 			memcpy(ret,v,size-16);
