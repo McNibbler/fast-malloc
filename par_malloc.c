@@ -363,18 +363,26 @@ void* xmalloc(size_t _bytes)
 			else
 			{
 				free_list_node* new_node=(free_list_node*)((char*)el+needed);
-				new_node->next=0;
 				new_node->size=remaining;
 				if(next==0)
 				{
 					reserve->cache=new_node;
+					reserve->cache_end=&new_node->next;
+					new_node->next=0;
 				}
 				else
 				{
-					(*reserve->cache_end)=new_node;
-					reserve->cache=next;
+					if(remaining<next->size)
+					{
+						(*reserve->cache_end)=new_node;
+						reserve->cache=next;
+					}
+					else
+					{
+						reserve->cache=new_node;
+						new_node->next=next;
+					}
 				}
-				reserve->cache_end=&new_node->next;
 			}
 			ret->size=needed;
 			reserve->cache_size-=needed;
