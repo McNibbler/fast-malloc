@@ -465,7 +465,7 @@ void* xmalloc(size_t _bytes)
 			munmap(last,data_end-last);
 		}
 		size_t const block_size=16*PAGE_SIZE;
-		size_t const to_alloc=block_size>needed?block_size:needed;
+		size_t const to_alloc=block_size>needed?block_size:(div_up(needed,PAGE_SIZE)*PAGE_SIZE);
 		data=mmap(0,to_alloc,PROT_READ|PROT_WRITE,MAP_ANONYMOUS|MAP_PRIVATE,-1,0);
 		data_end=data+to_alloc;
 	}
