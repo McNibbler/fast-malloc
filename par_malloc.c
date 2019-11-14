@@ -77,7 +77,7 @@ static void spinlock_unlock(atomic_flag* lock)
 
 // List of thread local reserves for the freed memory
 typedef struct reserve_list {
-	local_reserve* list;
+	local_reserve* reserve;
 	struct reserve_list* _Atomic next;
 } reserve_list;
 
@@ -85,8 +85,9 @@ typedef struct reserve_list {
 static reserve_list* _Atomic free_lists;
 
 // Adds a local free list to the global reserves list
-static void push_free_list(reserve_list* node)
+static void push_local_reserve(reserve_list* node)
 {
+	//printf("CHILD %x %x\n",node->reserve,node);
 	while(1)
 	{
 		reserve_list* head = atomic_load(&free_lists);
@@ -120,7 +121,7 @@ static free_list_node* next_block(free_list_node const* bl)
 // Returns true if the free list noes are adjacent to one another
 static int coelescable(free_list_node const* a, free_list_node const* b)
 {
-	return (next_block(a) == b);
+	return next_block(a) == b;
 }
 
 // Compile time constants
@@ -129,16 +130,11 @@ enum constants {
 	MIN_ALLOC_SIZE=32		// Smallest possible allocation given our structure
 };
 
-// Returns true if the given pointer is at the start of an mmap page allocation
-static int page_aligned(void* addr)
-{
-	return (((size_t)addr) % PAGE_SIZE) == 0;
-}
 
 ///// Mergesort implementation /////
 
 // Merges free list nodes together
-static free_list_node* merge_free_lists(free_list_node* a, free_list_node* b)
+static free_list_node* merge_free_lists_by_size(free_list_node* a,free_list_node* b)
 {
 	free_list_node* ret = NULL;
 	free_list_node** prev = &ret;
@@ -172,7 +168,7 @@ static free_list_node* merge_free_lists(free_list_node* a, free_list_node* b)
 }
 
 // Sorts the free list by size using mergesort
-static free_list_node* sort_free_list(free_list_node* head)
+static free_list_node* sort_free_list_by_size(free_list_node* head)
 {
 	// Base case, 1 or 0 elements
 	if(!head || !head->next)
@@ -198,18 +194,123 @@ static free_list_node* sort_free_list(free_list_node* head)
 
 	free_list_node* before_second_half = next;
 	free_list_node* far = next->next;
-	while(far&&(far = far->next))
+	while(far && (far = far->next))
 	{
 		far=far->next;
 		before_second_half=before_second_half->next;
 	}
+
 	free_list_node* second_half = before_second_half->next;
 	before_second_half->next = 0;
-	second_half = sort_free_list(second_half);
-	head = sort_free_list(head);
-
+	second_half = sort_free_list_by_size(second_half);
+	head=sort_free_list_by_size(head);
 	// Linear recombination step
-	return merge_free_lists(head,second_half);
+	return merge_free_lists_by_size(head,second_half);
+}
+
+// Merges the free list based on the address of the nodes
+static free_list_node* merge_free_lists_by_address(free_list_node* a, free_list_node* b)
+{
+	free_list_node* ret = NULL;
+	free_list_node** prev = &ret;
+	while(1)
+	{
+		// base case, null reached
+		if(!b)
+		{
+			*prev = a;
+			break;
+		}
+		if(!a)
+		{
+			*prev = b;
+			break;
+		}
+		if(a < b)
+		{
+			*prev = a;
+			prev = &a->next;
+			a = a->next;
+		}
+		else
+		{
+			*prev = b;
+			prev = &b->next;
+			b = b->next;
+		}
+	}
+	// If ret actually gets changed
+	if(ret)
+	{
+		free_list_node* head = ret;
+		free_list_node* next = head->next;
+		while(next)
+		{
+			if(coelescable(head,next))
+			{
+				head->size += next->size;
+				head->next = next->next;
+				next = head->next;
+			}
+			else
+			{
+				head = next;
+				next = next->next;
+			}
+		}
+	}
+	return ret;
+}
+
+// Sorts the free list by memory addresses using mergesort
+static free_list_node* sort_free_list_by_address(free_list_node* head)
+{
+	// Base Case, 0 or 1 element
+	if(head == 0 || head->next == 0)
+	{
+		return head;
+	}
+
+	// Splits the list, cleaning up with some coalesces on the way if it can
+	free_list_node* next = head->next;
+	if(next->next == 0)
+	{
+		if(head < next)
+		{
+			if(coelescable(head, next))
+			{
+				head->size += next->size;
+				head->next = 0;
+			}
+			return head;
+		}
+		else
+		{
+			if(coelescable(next, head))
+			{
+				next->size += head->size;
+			}
+			else
+			{
+				head->next = 0;
+				next->next = head;
+			}
+			return next;
+		}
+	}
+	free_list_node* before_second_half = head;
+	free_list_node* far = next->next;
+	while(far && (far = far->next))
+	{
+		far = far->next;
+		before_second_half = before_second_half->next;
+	}
+	free_list_node* second_half = before_second_half->next;
+	before_second_half->next = 0;
+	second_half = sort_free_list_by_address(second_half);
+	head=sort_free_list_by_address(head);
+	// Linear recombination step
+	return merge_free_lists_by_address(head, second_half);
 }
 
 ////////// Garbage collection thread //////////
@@ -227,146 +328,25 @@ static void* cleanup(void* _)
 			pthread_cond_wait(&gc_cv, &gc_mtx);
 		}
 
+		// Cleans up every free list in the thread reserves
 		atomic_store_explicit(&awakenings, 0, memory_order_release);
-
-		// For every free list in the thread reserves...
+		deleted = sort_free_list_by_address(deleted);
 		for(reserve_list* fll = atomic_load(&free_lists); fll; fll = fll->next)
 		{
-			// Gathers the currently queued freelist to collect garbage from
 			free_list_node* to_insert;
-			// TODO: These curly braces?
-			//{
-				local_reserve* list = fll->list;
-				spinlock_lock(&list->queue_lock);
-				to_insert = list->queue;
-				list->queue = 0;
-				spinlock_unlock(&list->queue_lock);
-			//}
-
-			// Runs through the queued freelist and adds the memory back to the reserve
-			while(to_insert)
 			{
-				free_list_node* next = to_insert->next;
-				if(deleted)
-				{
-					// If the node to reinsert comes before the running deleted list head
-					if(to_insert < deleted)
-					{
-						// Combines the memory block if adjacent, but links them regardless
-						if(coelescable(to_insert,deleted))
-						{
-							to_insert->size += deleted->size;
-							to_insert->next = deleted->next;
-							deleted = to_insert;
-						}
-						else
-						{
-							to_insert->next = deleted;
-						}
-					}
-					// if to_insert comes after the running deleted lsit head
-					else
-					{
-						// Cycles through the deletion list and coalesces what it can before,
-						// -- linking if it can't
-						free_list_node* prev = deleted;
-						free_list_node* head = deleted->next;
-						for(; head; prev = head, head = head->next)
-						{
-							// Adds in the first insertable node and jumps to the end
-							if(to_insert < head)
-							{
-								// Coalesces the insert node to the head if you can
-								if(coelescable(to_insert, head))
-								{
-									size_t const combined_size = to_insert->size + head->size;
-									if(coelescable(prev, to_insert))
-									{
-										prev->size += combined_size;
-										prev->next = head->next;
-									}
-									else
-									{
-										to_insert->next = head->next;
-										to_insert->size = combined_size;
-										prev->next = to_insert;
-									}
-								}
-								// If not, attempt with the previous node
-								else if(coelescable(prev, to_insert))
-								{
-									prev->size += to_insert->size;
-								}
-								else
-								{
-									prev->next = to_insert;
-									to_insert->next = head;
-								}
-								// Big brain breaks out of the loop after inserting
-								goto end_loop;
-							}
-						}
-						// If can't insert in the running head, try to coalesce or at least link
-						if(coelescable(prev, to_insert))
-						{
-							prev->size += to_insert->size;
-						}
-						else
-						{
-							prev->next = to_insert;
-							to_insert->next = head;
-						}
-
-					// End the loop after an insertion
-					end_loop:;
-					}
-				}
-				// Inserts the first node as deleted (base case)
-				else
-				{
-					deleted = to_insert;
-					deleted->next = NULL;
-				}
-				to_insert = next;
+				local_reserve* reserve = fll->reserve;
+				spinlock_lock(&reserve->queue_lock);
+				to_insert = reserve->queue;
+				reserve->queue = 0;
+				spinlock_unlock(&reserve->queue_lock);
 			}
-
-			// TODO: Remove this, but make sure we don't need it anymore
-
-			/*
-			if(deleted)
-			{
-				free_list_node** prev=&deleted;
-				free_list_node* head=deleted;
-				do
-				{
-					size_t const size=deleted->size;
-					size_t const num_pages=size/PAGE_SIZE;
-					size_t const num_bytes=num_pages*PAGE_SIZE;
-					if(num_bytes==size)
-					{
-						free_list_node* next=head->next;
-						munmap(head,num_bytes);
-						head=next;
-						*prev=head;
-					}
-					else
-					{
-						free_list_node* next=head->next;
-						munmap(head,num_bytes);
-						free_list_node* new_head=(free_list_node*)((char*)head+num_bytes);
-						new_head->next=next;
-						new_head->size=size-num_bytes;
-						*prev=head;
-						prev=&head->next;
-						head=next;
-					}
-				} while(head);
-			}
-			*/
+			to_insert = sort_free_list_by_address(to_insert);
+			deleted = merge_free_lists_by_address(to_insert,deleted);
 		}
 
-		// Updates the global heap of deleted memory 
-		free_list_node* sorted = sort_free_list(deleted);
+		// Updates the global heap of deleted memory with what was collected from the local threads
+		free_list_node* sorted = sort_free_list_by_size(deleted);
 		spinlock_lock(&heap_lock);
 		deleted = global_heap;
 		global_heap = sorted;
@@ -380,16 +360,16 @@ static void* cleanup(void* _)
 // Gets the thread's local free list reserve
 static local_reserve* get_reserve()
 {
-	static __thread local_reserve fl={0, 0, 0, ATOMIC_FLAG_INIT, 0};
-	static __thread reserve_list fll={0, ATOMIC_VAR_INIT((void*)0)};
+	static __thread local_reserve reserve = {0, 0, 0, ATOMIC_FLAG_INIT, 0};
+	static __thread reserve_list list = {0, ATOMIC_VAR_INIT((void*)0)};
 	// If uninitialized
-	if(unlikely(fll.list == NULL))
+	if(unlikely(list.reserve == 0))
 	{
-		fll.list = &fl;
-		fl.cache_end = &fl.cache;
-		push_free_list(&fll);
+		list.reserve = &reserve;
+		reserve.cache_end = &reserve.cache;
+		push_local_reserve(&list);
 	}
-	return &fl;
+	return &reserve;
 }
 
 // Byte aligns the data
@@ -541,14 +521,14 @@ void* xmalloc(size_t _bytes)
 	}
 
 	// Initializes the garbage collector thread on the first malloc call
-	static __thread int gc_initt = 0;
-	if(unlikely(!gc_initt))
+	static __thread int gc_inited = 0;
+	if(unlikely(!gc_inited))
 	{
 		if(!atomic_flag_test_and_set(&gc_init))
 		{
 			pthread_create(&garbage_collector, 0, cleanup, 0);
 		}
-		gc_initt = 1;
+		gc_inited = 1;
 	}
 
 	// Gathers the pointers needed for the allocation and it's size and the thread's reserve
@@ -583,7 +563,7 @@ void* xmalloc(size_t _bytes)
 			char* last=(char*)(div_up((size_t)data, PAGE_SIZE) * PAGE_SIZE);
 			munmap(last, data_end - last);
 		}
-		size_t const block_size = 32 * PAGE_SIZE;
+		size_t const block_size = 16 * PAGE_SIZE;
 		size_t const to_alloc = block_size > needed ? block_size : needed;
 		data = mmap(0, to_alloc, PROT_READ | PROT_WRITE, MAP_ANONYMOUS | MAP_PRIVATE, -1, 0);
 		data_end = data + to_alloc;
@@ -617,7 +597,7 @@ void xfree(void* ptr)
 		start->next = reserve->cache;
 		reserve->cache = start;
 		reserve->cache_size += size;
-		size_t const CACHE_LIMIT = PAGE_SIZE;
+		size_t const CACHE_LIMIT = 20 * PAGE_SIZE;
 		
 		// For frees of large allocations
 		if(reserve->cache_size >= CACHE_LIMIT)
