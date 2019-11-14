@@ -323,32 +323,14 @@ static size_t fix_size(size_t _bytes)
 	return div_up(_bytes+16,16)*16;
 }
 
-void* xmalloc(size_t _bytes)
+static void* take_from_cache(local_reserve* reserve,size_t const needed)
 {
-	if(unlikely(_bytes==0))
-	{
-		return 0;
-	}
-	static __thread int gc_initt=0;
-	if(unlikely(!gc_initt))
-	{
-		if(!atomic_flag_test_and_set(&gc_init))
-		{
-			pthread_create(&garbage_collector,0,cleanup,0);
-		}
-		gc_initt=1;
-	}
-	static __thread char* data=0;
-	static __thread char* data_end=0;
-	size_t const needed=fix_size(_bytes);
-	local_reserve* reserve=get_reserve();
 	if(reserve->cache)
 	{
 		free_list_node* el=reserve->cache;
 		size_t const el_size=el->size;
 		if(needed<=el_size)
 		{
-			//printf("Taking from cache\n");
 			free_list_node* next=el->next;
 			memblock* ret=(memblock*)el;
 			size_t const remaining=el_size-needed;
@@ -389,53 +371,94 @@ void* xmalloc(size_t _bytes)
 			return ret->data;
 		}
 	}
-	if(unlikely(data+needed>data_end))
+	return 0;
+}
+
+static void* take_from_global_heap(local_reserve* reserve,size_t const needed)
+{
+	spinlock_lock(&heap_lock);
+	free_list_node* head=global_heap;
+	if(head&&head->size>=needed)
 	{
-		spinlock_lock(&heap_lock);
-		free_list_node* head=global_heap;
-		if(head&&head->size>=needed)
+		global_heap=head->next;
+		spinlock_unlock(&heap_lock);
+		//printf("Taking from global heap\n");
+		size_t const remaining=head->size-needed;
+		if(remaining<MIN_ALLOC_SIZE)
 		{
-			global_heap=head->next;
-			spinlock_unlock(&heap_lock);
-			//printf("Taking from global heap\n");
-			size_t const remaining=head->size-needed;
-			if(remaining<MIN_ALLOC_SIZE)
+			memblock* ret=(memblock*)head;
+			return ret->data;
+		}
+		else
+		{
+			memblock* ret=(memblock*)head;
+			ret->size=needed;
+			free_list_node* left=(free_list_node*)((char*)head+needed);
+			left->size=remaining;
+			reserve->cache_size+=remaining;
+			if(reserve->cache==0)
 			{
-				memblock* ret=(memblock*)head;
-				return ret->data;
+				reserve->cache=left;
+				left->next=0;
+				reserve->cache_end=&left->next;
 			}
-			else 
+			else
 			{
-				memblock* ret=(memblock*)head;
-				ret->size=needed;
-				free_list_node* left=(free_list_node*)((char*)head+needed);
-				left->size=remaining;
-				reserve->cache_size+=remaining;
-				if(reserve->cache==0)
+				if(remaining<reserve->cache->size)
 				{
-					reserve->cache=left;
+					(*reserve->cache_end)=left;
 					left->next=0;
 					reserve->cache_end=&left->next;
 				}
 				else
 				{
-					if(remaining<reserve->cache->size)
-					{
-						(*reserve->cache_end)=left;
-						left->next=0;
-						reserve->cache_end=&left->next;
-					}
-					else
-					{
-						free_list_node* next=reserve->cache;
-						reserve->cache=left;
-						left->next=next;
-					}
+					free_list_node* next=reserve->cache;
+					reserve->cache=left;
+					left->next=next;
 				}
-				return ret->data;
+			}
+			return ret->data;
+		}
+	}
+	spinlock_unlock(&heap_lock);
+	return 0;
+}
+
+void* xmalloc(size_t _bytes)
+{
+	if(unlikely(_bytes==0))
+	{
+		return 0;
+	}
+	static __thread int gc_initt=0;
+	if(unlikely(!gc_initt))
+	{
+		if(!atomic_flag_test_and_set(&gc_init))
+		{
+			pthread_create(&garbage_collector,0,cleanup,0);
+		}
+		gc_initt=1;
+	}
+	static __thread char* data=0;
+	static __thread char* data_end=0;
+	size_t const needed=fix_size(_bytes);
+	local_reserve* reserve=get_reserve();
+	{
+		void* from_cache=take_from_cache(reserve,needed);
+		if(from_cache)
+		{
+			return from_cache;
+		}
+	}
+	if(unlikely(data+needed>data_end))
+	{
+		{
+			void* from_global_heap=take_from_global_heap(reserve,needed);
+			if(from_global_heap)
+			{
+				return from_global_heap;
 			}
 		}
-		spinlock_unlock(&heap_lock);
 		//printf("Reallocing data\n");
 		if(data)
 		{
