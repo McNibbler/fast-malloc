@@ -1,6 +1,8 @@
 // Challenge 2 - Fast Malloc
 // Eddie Xie
 // Thomas Kaunzinger
+//
+// Attempt 1 - Buddy System Method
 
 // Library imports
 #include <stdlib.h>
