@@ -438,6 +438,7 @@ void xfree(void* ptr)
 		}
 		start->next=reserve->cache;
 		reserve->cache=start;
+		reserve->cache_size+=size;
 		size_t const CACHE_LIMIT=PAGE_SIZE;
 		if(reserve->cache_size>=CACHE_LIMIT)
 		{
