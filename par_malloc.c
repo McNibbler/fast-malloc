@@ -133,14 +133,14 @@ enum constants {
 
 ///// Mergesort implementation /////
 
-// Merges free list nodes together
-static free_list_node* merge_free_lists_by_size(free_list_node* a,free_list_node* b)
+// Merges two free lists together based on size
+static free_list_node* merge_free_lists_by_size(free_list_node* a, free_list_node* b)
 {
 	free_list_node* ret = NULL;
 	free_list_node** prev = &ret;
 	while(1)
 	{
-		// base cases, null reached
+		// base cases, null reached, quit merging
 		if(!b)
 		{
 			*prev = a;
@@ -151,17 +151,18 @@ static free_list_node* merge_free_lists_by_size(free_list_node* a,free_list_node
 			*prev = b;
 			break;
 		}
+		// Compares sizes and inserts to the growing return value prioritizing largest size
 		if(a->size > b->size)
 		{
-			*prev=a;
-			prev=&a->next;
-			a=a->next;
+			*prev = a;
+			prev = &a->next;
+			a = a->next;
 		}
 		else
 		{
-			*prev=b;
-			prev=&b->next;
-			b=b->next;
+			*prev = b;
+			prev = &b->next;
+			b = b->next;
 		}
 	}
 	return ret;
@@ -208,14 +209,14 @@ static free_list_node* sort_free_list_by_size(free_list_node* head)
 	return merge_free_lists_by_size(head,second_half);
 }
 
-// Merges the free list based on the address of the nodes
+// Merges two free lists together based on which nodes show earliest in memory
 static free_list_node* merge_free_lists_by_address(free_list_node* a, free_list_node* b)
 {
 	free_list_node* ret = NULL;
 	free_list_node** prev = &ret;
 	while(1)
 	{
-		// base case, null reached
+		// base case, null reached, quit merging
 		if(!b)
 		{
 			*prev = a;
@@ -226,6 +227,7 @@ static free_list_node* merge_free_lists_by_address(free_list_node* a, free_list_
 			*prev = b;
 			break;
 		}
+		// Compares pointers and inserts to the growing return value prioritizing earliest node
 		if(a < b)
 		{
 			*prev = a;
@@ -239,11 +241,12 @@ static free_list_node* merge_free_lists_by_address(free_list_node* a, free_list_
 			b = b->next;
 		}
 	}
-	// If ret actually gets changed
+	// If ret is not null
 	if(ret)
 	{
 		free_list_node* head = ret;
 		free_list_node* next = head->next;
+		// Link nodes in free list and coalesce where possible
 		while(next)
 		{
 			if(coelescable(head,next))
@@ -378,10 +381,10 @@ static size_t fix_size(size_t _bytes)
 	return div_up(_bytes + 16, 16)*16;
 }
 
-// Allocates memory from the global cache if there is some available
+// Allocates memory from the thread local cache if there is some memory available
 static void* take_from_cache(local_reserve* reserve, size_t const needed)
 {
-	// If there actually is a cache available
+	// If there actually is a cache available in this thread's reserve
 	if(reserve->cache)
 	{
 		free_list_node* el = reserve->cache;
