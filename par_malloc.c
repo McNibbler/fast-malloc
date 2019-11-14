@@ -162,6 +162,7 @@ static free_list_node* sort_free_list(free_list_node* head)
 	free_list_node* far=next->next;
 	while(far&&(far=far->next))
 	{
+		far=far->next;
 		before_second_half=before_second_half->next;
 	}
 	free_list_node* second_half=before_second_half->next;
