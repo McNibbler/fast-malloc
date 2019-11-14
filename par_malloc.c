@@ -318,7 +318,7 @@ void* xmalloc(size_t _bytes)
 		return 0;
 	}
 	static __thread int gc_initt=0;
-	if(!gc_initt)
+	if(unlikely(!gc_initt))
 	{
 		if(!atomic_flag_test_and_set(&gc_init))
 		{
