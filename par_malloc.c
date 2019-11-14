@@ -235,7 +235,7 @@ static free_list* get_reserve()
 
 void* xmalloc(size_t _bytes)
 {
-	if(_bytes==0)
+	if(unlikely(_bytes==0))
 	{
 		return 0;
 	}
@@ -283,7 +283,7 @@ void* xmalloc(size_t _bytes)
 			return ret->data;
 		}
 	}
-	if(data+needed>data_end)
+	if(unlikely(data+needed>data_end))
 	{
 		if(data)
 		{
@@ -304,7 +304,7 @@ void* xmalloc(size_t _bytes)
 
 void xfree(void* ptr)
 {
-	if(ptr)
+	if(likely(ptr))
 	{
 		free_list_node* start=(free_list_node*)((char*)ptr-16);
 		memblock* block=(memblock*)start;
@@ -334,7 +334,7 @@ void xfree(void* ptr)
 
 void* xrealloc(void* v,size_t bytes)
 {
-	if(v)
+	if(likely(v))
 	{
 		size_t const size=*((size_t*)v-2);
 		size_t const needed=div_up(bytes+16,16)*16;
