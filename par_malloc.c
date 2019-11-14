@@ -20,7 +20,7 @@
 // it is sent to a garbage collector thread that will
 // munmap unused memory if it can.
 // On allocation, memory is taken from the free list,
-// from the block of data available or newly allocated,
+// from the block of data available, or newly allocated,
 // in that order.
 
 static size_t div_up(size_t xx,size_t yy)
