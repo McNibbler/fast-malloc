@@ -257,11 +257,6 @@ static void* cleanup(void* _)
 				}
 				to_insert=next;
 			}
-			free_list_node* sorted=sort_free_list(deleted);
-			spinlock_lock(&heap_lock);
-			deleted=global_heap;
-			global_heap=sorted;
-			spinlock_unlock(&heap_lock);
 			/*
 			if(deleted)
 			{
@@ -294,6 +289,11 @@ static void* cleanup(void* _)
 			}
 			*/
 		}
+		free_list_node* sorted=sort_free_list(deleted);
+		spinlock_lock(&heap_lock);
+		deleted=global_heap;
+		global_heap=sorted;
+		spinlock_unlock(&heap_lock);
 	}
 	return 0;
 }
