@@ -24,7 +24,7 @@ typedef struct free_list free_list;
 typedef struct free_list_node {
 	size_t size;
 	struct free_list_node* next;
-	//struct free_list_node* prev;
+	struct free_list_node* prev;
 } free_list_node;
 
 typedef struct free_list {
@@ -33,6 +33,8 @@ typedef struct free_list {
 	free_list_node** cache_end;
 	atomic_flag queue_lock;
 	free_list_node* queue; // singly linked
+	free_list_node* free; // doubly linked
+	free_list* best_node;
 } free_list;
 
 void spinlock_lock(atomic_flag* lock)
@@ -86,20 +88,15 @@ static int coelescable(free_list_node const* a,free_list_node const* b)
 	return (next_block(a)==b);
 }
 
-static int page_aligned(void* addr)
-{
-	return (((size_t)addr)%4096)==0;
-}
-
 static void* cleanup(void* _)
 {
-	free_list_node* deleted=0;
 	while(1)
 	{
 		pthread_mutex_lock(&gc_mtx);
 		pthread_cond_wait(&gc_cv,&gc_mtx);
 		for(free_list_list* fll=atomic_load(&free_lists);fll;fll=fll->next)
 		{
+			break;
 			free_list* list=fll->list;
 			free_list_node* to_insert;
 			spinlock_lock(&list->queue_lock);
@@ -108,26 +105,26 @@ static void* cleanup(void* _)
 			spinlock_unlock(&list->queue_lock);
 			while(to_insert)
 			{
-				free_list_node* next=to_insert->next;
-				if(deleted)
+				free_list* next=to_insert->next;
+				if(list->free)
 				{
-					if(to_insert<deleted)
+					if(to_insert<list->free)
 					{
-						if(coelescable(to_insert,deleted))
+						if(coelescable(to_insert,list->free))
 						{
-							to_insert->size+=deleted->size;
-							to_insert->next=deleted->next;
-							deleted=to_insert;
+							to_insert->size+=list->free->size;
+							to_insert->next=list->free->next;
+							list->free=to_insert;
 						}
 						else
 						{
-							to_insert->next=deleted;
+							to_insert->next=list->free;
 						}
 					}
 					else
 					{
-						free_list_node* prev=deleted;
-						free_list_node* head=deleted->next;
+						free_list_node* prev=list->free;
+						free_list_node* head=list->free->next;
 						for(;head;prev=head,head=head->next)
 						{
 							if(to_insert<head)
@@ -135,6 +132,7 @@ static void* cleanup(void* _)
 								if(coelescable(to_insert,head))
 								{
 									size_t const combined_size=to_insert->size+head->size;
+									//printf("combined size %ld\n",combined_size);
 									if(coelescable(prev,to_insert))
 									{
 										prev->size+=combined_size;
@@ -173,39 +171,10 @@ static void* cleanup(void* _)
 				}
 				else
 				{
-					deleted=to_insert;
-					deleted->next=0;
+					list->free=to_insert;
+					list->free->next=0;
 				}
 				to_insert=next;
-			}
-			if(deleted)
-			{
-				free_list_node** prev=&deleted;
-				free_list_node* head=deleted;
-				do
-				{
-					size_t const size=deleted->size;
-					size_t const num_pages=size/4096;
-					size_t const num_bytes=num_pages*4096;
-					if(num_bytes==size)
-					{
-						free_list_node* next=head->next;
-						munmap(head,num_bytes);
-						head=next;
-						*prev=head;
-					}
-					else
-					{
-						free_list_node* next=head->next;
-						munmap(head,num_bytes);
-						free_list_node* new_head=(free_list_node*)((char*)head+num_bytes);
-						new_head->next=next;
-						new_head->size=size-num_bytes;
-						*prev=head;
-						prev=&head->next;
-						head=next;
-					}
-				} while(head);
 			}
 		}
 	}
@@ -214,8 +183,8 @@ static void* cleanup(void* _)
 
 static free_list* get_reserve()
 {
-	static __thread free_list fl;
-	static __thread free_list_list fll;
+	static __thread free_list fl={0,0,0,0,0,0};
+	static __thread free_list_list fll={0,0};
 	if(unlikely(fll.list==0))
 	{
 		fll.list=&fl;
@@ -298,7 +267,7 @@ void xfree(void* ptr)
 {
 	if(ptr)
 	{
-		free_list_node* start=(free_list_node*)((char*)ptr-16);
+		free_list_node* start=(char*)ptr-16;
 		memblock* block=(memblock*)start;
 		// put memory on thread local cache
 		free_list* reserve=get_reserve();
@@ -309,7 +278,7 @@ void xfree(void* ptr)
 		}
 		start->next=reserve->cache;
 		reserve->cache=start;
-		size_t const CACHE_LIMIT=4096;
+		size_t const CACHE_LIMIT=512;
 		if(reserve->cache_size>=CACHE_LIMIT)
 		{
 			spinlock_lock(&reserve->queue_lock);
