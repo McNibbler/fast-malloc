@@ -12,7 +12,15 @@
 #define likely(x)      __builtin_expect(!!(x), 1) 
 #define unlikely(x)    __builtin_expect(!!(x), 0) 
 
-// This has the Nat Tuck seal of "not actually a stupid idea" 
+// This has the Nat Tuck seal of "not actually a stupid idea"
+// Each thread allocates a block of memory to take from
+// On freeing, memory segments are consed to the front of 
+// Thread-local free list, if the cache grows too big
+// it is sent to a garbage collector thread that will
+// munmap unused memory if it can
+// On allocation, memory is taken from the free list,
+// from the block of data available or new allocated,
+// in that order
 
 static size_t div_up(size_t xx,size_t yy)
 {
@@ -56,9 +64,9 @@ typedef struct memblock {
 	char data[];
 } memblock;
 
-free_list_list* _Atomic free_lists;
+static free_list_list* _Atomic free_lists;
 
-void push_free_list(free_list_list* node)
+static void push_free_list(free_list_list* node)
 {
 	while(1)
 	{
@@ -344,5 +352,3 @@ void* xrealloc(void* v,size_t bytes)
 		return xmalloc(bytes);
 	}
 }
-
-
