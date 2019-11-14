@@ -71,7 +71,7 @@ static void push_local_reserve(reserve_list* node)
 	{
 		reserve_list* head=atomic_load(&free_lists);
 		node->next=head;
-		if(atomic_compare_exchange_weak(&free_lists,&head,node))
+		if(atomic_compare_exchange_strong(&free_lists,&head,node))
 		{
 			break;
 		}
