@@ -1,0 +1,60 @@
+-----------------------------
+| Challenge 2 - Fast Malloc |
+| Eddie Xie                 |
+| Thomas Kaunzinger         |
+-----------------------------
+
+Results
+-------
+
+List
+---------------------------------
+| System | HW08   | Fast Malloc |
+---------------------------------
+| 62ms   | 1175ms | 37ms        |
+---------------------------------
+
+iVec
+---------------------------------
+| System | HW08   | Fast Malloc |
+---------------------------------
+| 38ms   | 79ms   | 31ms        |
+---------------------------------
+
+OS Information
+--------------
+Operating System: Windows 10 with WSL (Ubuntu 18.04.1)
+Processor: Intel i7-8750H
+RAM: 16GB
+
+Strategy and Results
+--------------------
+For our initial design, we tried to follow a similar approach to Facebook's jemalloc, which used a
+buddy system allocator that would have unique arenas for the different threads, containing several
+free lists of data at various buckets that would represent the size of each allocated node in that
+level's free list. With this, we would have the benefit of not needing to scan to find available
+spaces that would fit the size of the allocation. Regrettably, this proved to be very annoying to
+implement, and after a few days of attempting and reaching many roadblocks, we gave up on this
+approach. It's remains can be seen in the file "binary_failure.c.old" for your viewing pleasure.
+
+Our current approach initially started as a joke, but proved to actually be less stupid of an idea
+than initially anticipated. Initially, we joked that wwe could make a really fast allocator if we
+just gave a giant cache of available memory from the start, giving very fast access to the memory.
+However, it turns out, that approach of working in large blocks at a time is actually not uncommon,
+and is similar to the approach used by Google's own tcmalloc. In creating a large heap of space in
+infrequent but large mmap calls, we can reduce the number of syscalls and amortize them to what
+would be a relatively inexpensive event because of its infrequency. Of course, we needed some means
+of actually dynamically adding more memory when it would become necessary, and we also needed to
+make an effort to free and reintroduce memory back into the system so it wouldn't get completely
+wasted. To achieve this, we could deal with the reintroduction by using a new thread for the sole
+purpose of garbage collection, leaving the purpose of our free function to effectively place space
+into a queue to get collected later. For our design, we had an immediately available cache stored
+locally to the thread in its own free list, but when that cache grew to be large, it would instead
+summon the garbage collector to coalesce that would instead add to the global heap. As for the
+actual allocation, we would first take from the free list that would be in the thread's local
+cache, but if there was none available then we would grab from the large global heap of memory.
+Only if that large space got filled would we consider calling a new mmap. This design proved to be
+slightly simpler, implementation wise, than our first attempt, and ended up being considerably
+faster than the system malloc for the provided tests.
+
+
