@@ -58,19 +58,20 @@ static void spinlock_unlock(atomic_flag* lock)
 }
 
 typedef struct reserve_list {
-	local_reserve* list;
+	local_reserve* reserve;
 	struct reserve_list* _Atomic next;
 } reserve_list;
 
 static reserve_list* _Atomic free_lists;
 
-static void push_free_list(reserve_list* node)
+static void push_local_reserve(reserve_list* node)
 {
+	//printf("CHILD %x %x\n",node->reserve,node);
 	while(1)
 	{
 		reserve_list* head=atomic_load(&free_lists);
 		node->next=head;
-		if(atomic_compare_exchange_strong(&free_lists,&head,node))
+		if(atomic_compare_exchange_weak(&free_lists,&head,node))
 		{
 			break;
 		}
@@ -93,7 +94,7 @@ static free_list_node* next_block(free_list_node const* bl)
 
 static int coelescable(free_list_node const* a,free_list_node const* b)
 {
-	return (next_block(a)==b);
+	return next_block(a)==b;
 }
 
 enum constants {
@@ -101,12 +102,12 @@ enum constants {
 	MIN_ALLOC_SIZE=32
 };
 
-static int page_aligned(void* addr)
-{
-	return (((size_t)addr)%PAGE_SIZE)==0;
-}
+//static int page_aligned(void* addr)
+//{
+//	return (((size_t)addr)%PAGE_SIZE)==0;
+//}
 
-static free_list_node* merge_free_lists(free_list_node* a,free_list_node* b)
+static free_list_node* merge_free_lists_by_size(free_list_node* a,free_list_node* b)
 {
 	free_list_node* ret=0;
 	free_list_node** prev=&ret;
@@ -138,7 +139,7 @@ static free_list_node* merge_free_lists(free_list_node* a,free_list_node* b)
 	return ret;
 }
 
-static free_list_node* sort_free_list(free_list_node* head)
+static free_list_node* sort_free_list_by_size(free_list_node* head)
 {
 	if(head==0||head->next==0)
 	{
@@ -167,9 +168,97 @@ static free_list_node* sort_free_list(free_list_node* head)
 	}
 	free_list_node* second_half=before_second_half->next;
 	before_second_half->next=0;
-	second_half=sort_free_list(second_half);
-	head=sort_free_list(head);
-	return merge_free_lists(head,second_half);
+	second_half=sort_free_list_by_size(second_half);
+	head=sort_free_list_by_size(head);
+	return merge_free_lists_by_size(head,second_half);
+}
+
+static free_list_node* merge_free_lists_by_address(free_list_node* a,free_list_node* b)
+{
+	free_list_node* ret=0;
+	free_list_node** prev=&ret;
+	while(1)
+	{
+		if(b==0)
+		{
+			*prev=a;
+			break;
+		}
+		if(a==0)
+		{
+			*prev=b;
+			break;
+		}
+		if(a<b)
+		{
+			*prev=a;
+			prev=&a->next;
+			if(coelescable(a,b))
+			{
+				a->size+=b->size;
+				b=b->next;
+			}
+			a=a->next;
+		}
+		else
+		{
+			*prev=b;
+			prev=&b->next;
+			if(coelescable(b,a))
+			{
+				b->size+=a->size;
+				a=a->next;
+			}
+			b=b->next;
+		}
+	}
+	return ret;
+}
+
+static free_list_node* sort_free_list_by_address(free_list_node* head)
+{
+	if(head==0||head->next==0)
+	{
+		return head;
+	}
+	free_list_node* next=head->next;
+	if(next->next==0)
+	{
+		if(head<next)
+		{
+			if(coelescable(head,next))
+			{
+				head->size+=next->size;
+				head->next=0;
+			}
+			return head;
+		}
+		else
+		{
+			if(coelescable(next,head))
+			{
+				next->size+=head->size;
+			}
+			else
+			{
+				head->next=0;
+				next->next=head;
+			}
+			return next;
+		}
+	}
+	free_list_node* before_second_half=head;
+	free_list_node* far=next->next;
+	while(far&&(far=far->next))
+	{
+		far=far->next;
+		before_second_half=before_second_half->next;
+	}
+	free_list_node* second_half=before_second_half->next;
+	before_second_half->next=0;
+	second_half=sort_free_list_by_address(second_half);
+	head=sort_free_list_by_address(head);
+	return merge_free_lists_by_address(head,second_half);
 }
 
 static void* cleanup(void* _)
@@ -183,121 +272,31 @@ static void* cleanup(void* _)
 			pthread_cond_wait(&gc_cv,&gc_mtx);
 		}
 		atomic_store_explicit(&awakenings,0,memory_order_release);
+		deleted=sort_free_list_by_address(deleted);
 		for(reserve_list* fll=atomic_load(&free_lists);fll;fll=fll->next)
 		{
 			free_list_node* to_insert;
 			{
-				local_reserve* list=fll->list;
-				spinlock_lock(&list->queue_lock);
-				to_insert=list->queue;
-				list->queue=0;
-				spinlock_unlock(&list->queue_lock);
+				local_reserve* reserve=fll->reserve;
+				spinlock_lock(&reserve->queue_lock);
+				to_insert=reserve->queue;
+				reserve->queue=0;
+				spinlock_unlock(&reserve->queue_lock);
 			}
-			while(to_insert)
-			{
-				free_list_node* next=to_insert->next;
-				if(deleted)
-				{
-					if(to_insert<deleted)
-					{
-						if(coelescable(to_insert,deleted))
-						{
-							to_insert->size+=deleted->size;
-							to_insert->next=deleted->next;
-							deleted=to_insert;
-						}
-						else
-						{
-							to_insert->next=deleted;
-						}
-					}
-					else
-					{
-						free_list_node* prev=deleted;
-						free_list_node* head=deleted->next;
-						for(;head;prev=head,head=head->next)
-						{
-							if(to_insert<head)
-							{
-								if(coelescable(to_insert,head))
-								{
-									size_t const combined_size=to_insert->size+head->size;
-									if(coelescable(prev,to_insert))
-									{
-										prev->size+=combined_size;
-										prev->next=head->next;
-									}
-									else
-									{
-										to_insert->next=head->next;
-										to_insert->size=combined_size;
-										prev->next=to_insert;
-									}
-								}
-								else if(coelescable(prev,to_insert))
-								{
-									prev->size+=to_insert->size;
-								}
-								else
-								{
-									prev->next=to_insert;
-									to_insert->next=head;
-								}
-								goto end_loop;
-							}
-						}
-						if(coelescable(prev,to_insert))
-						{
-							prev->size+=to_insert->size;
-						}
-						else
-						{
-							prev->next=to_insert;
-							to_insert->next=head;
-						}
-					end_loop:;
-					}
-				}
-				else
-				{
-					deleted=to_insert;
-					deleted->next=0;
-				}
-				to_insert=next;
-			}
-			/*
-			if(deleted)
-			{
-				free_list_node** prev=&deleted;
-				free_list_node* head=deleted;
-				do
-				{
-					size_t const size=deleted->size;
-					size_t const num_pages=size/PAGE_SIZE;
-					size_t const num_bytes=num_pages*PAGE_SIZE;
-					if(num_bytes==size)
-					{
-						free_list_node* next=head->next;
-						munmap(head,num_bytes);
-						head=next;
-						*prev=head;
-					}
-					else
-					{
-						free_list_node* next=head->next;
-						munmap(head,num_bytes);
-						free_list_node* new_head=(free_list_node*)((char*)head+num_bytes);
-						new_head->next=next;
-						new_head->size=size-num_bytes;
-						*prev=head;
-						prev=&head->next;
-						head=next;
-					}
-				} while(head);
-			}
-			*/
+			to_insert=sort_free_list_by_address(to_insert);
+			deleted=merge_free_lists_by_address(to_insert,deleted);
 		}
-		free_list_node* sorted=sort_free_list(deleted);
+		printf("xxxxxxxxxxxxxx\n");
+		for(free_list_node* h=deleted;h;h=h->next)
+		{
+			printf("%x %ld\n",h,h->size);
+		}
+		free_list_node* sorted=sort_free_list_by_size(deleted);
+		printf("yyyyyyyyyyyyyyy\n");
+		for(free_list_node* h=sorted;h;h=h->next)
+		{
+			printf("%x %ld\n",h,h->size);
+		}
 		spinlock_lock(&heap_lock);
 		deleted=global_heap;
 		global_heap=sorted;
@@ -308,15 +307,15 @@ static void* cleanup(void* _)
 
 static local_reserve* get_reserve()
 {
-	static __thread local_reserve fl={0,0,0,ATOMIC_FLAG_INIT,0};
-	static __thread reserve_list fll={0,ATOMIC_VAR_INIT((void*)0)};
-	if(unlikely(fll.list==0))
+	static __thread local_reserve reserve={0,0,0,ATOMIC_FLAG_INIT,0};
+	static __thread reserve_list list={0,ATOMIC_VAR_INIT((void*)0)};
+	if(unlikely(list.reserve==0))
 	{
-		fll.list=&fl;
-		fl.cache_end=&fl.cache;
-		push_free_list(&fll);
+		list.reserve=&reserve;
+		reserve.cache_end=&reserve.cache;
+		push_local_reserve(&list);
 	}
-	return &fl;
+	return &reserve;
 }
 
 static size_t fix_size(size_t _bytes)
@@ -431,14 +430,14 @@ void* xmalloc(size_t _bytes)
 	{
 		return 0;
 	}
-	static __thread int gc_initt=0;
-	if(unlikely(!gc_initt))
+	static __thread int gc_inited=0;
+	if(unlikely(!gc_inited))
 	{
 		if(!atomic_flag_test_and_set(&gc_init))
 		{
 			pthread_create(&garbage_collector,0,cleanup,0);
 		}
-		gc_initt=1;
+		gc_inited=1;
 	}
 	static __thread char* data=0;
 	static __thread char* data_end=0;
@@ -466,7 +465,7 @@ void* xmalloc(size_t _bytes)
 			char* last=(char*)(div_up((size_t)data,PAGE_SIZE)*PAGE_SIZE);
 			munmap(last,data_end-last);
 		}
-		size_t const block_size=32*PAGE_SIZE;
+		size_t const block_size=16*PAGE_SIZE;
 		size_t const to_alloc=block_size>needed?block_size:needed;
 		data=mmap(0,to_alloc,PROT_READ|PROT_WRITE,MAP_ANONYMOUS|MAP_PRIVATE,-1,0);
 		data_end=data+to_alloc;
@@ -503,7 +502,7 @@ void xfree(void* ptr)
 		if(reserve->cache_size>=CACHE_LIMIT)
 		{
 			spinlock_lock(&reserve->queue_lock);
-			(*reserve->cache_end)=reserve->queue;
+			*(reserve->cache_end)=reserve->queue;
 			reserve->queue=reserve->cache;
 			spinlock_unlock(&reserve->queue_lock);
 			atomic_fetch_add_explicit(&awakenings,1,memory_order_release);
