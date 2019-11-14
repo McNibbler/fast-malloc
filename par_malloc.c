@@ -18,10 +18,10 @@
 // On freeing, memory segments are consed to the front of a
 // thread-local free list, if the cache grows too big
 // it is sent to a garbage collector thread that will
-// munmap unused memory if it can.
+// coealesce memory and post it to a global heap.
 // On allocation, memory is taken from the free list,
-// from the block of data available, or newly allocated,
-// in that order.
+// from the block of data available, from the global heap,
+// or newly allocated, in that order.
 
 static size_t div_up(size_t xx,size_t yy)
 {
@@ -59,7 +59,7 @@ typedef struct reserve_list {
 
 typedef struct memblock {
 	size_t size;
-	local_reserve* reserve;
+	size_t _padding;
 	char data[];
 } memblock;
 
@@ -77,6 +77,9 @@ static void push_free_list(reserve_list* node)
 		}
 	}
 }
+
+static free_list_node* global_heap=0;
+static atomic_flag heap_lock=ATOMIC_FLAG_INIT;
 
 static pthread_mutex_t gc_mtx=PTHREAD_MUTEX_INITIALIZER;
 static pthread_cond_t gc_cv=PTHREAD_COND_INITIALIZER;
@@ -101,6 +104,66 @@ enum constants {
 static int page_aligned(void* addr)
 {
 	return (((size_t)addr)%PAGE_SIZE)==0;
+}
+
+static free_list_node* sort_free_list(free_list_node* head)
+{
+	if(head==0||head->next==0)
+	{
+		return head;
+	}
+	free_list_node* next=head->next;
+	if(next->next==0)
+	{
+		if(head->size<next->size)
+		{
+			next->next=head;
+			head->next=0;
+			return next;
+		}
+		else
+		{
+			return head;
+		}
+	}
+	free_list_node* before_second_half=next;
+	free_list_node* far=next->next;
+	while(far&&(far=far->next))
+	{
+		before_second_half=before_second_half->next;
+	}
+	free_list_node* second_half=before_second_half->next;
+	before_second_half->next=0;
+	second_half=sort_free_list(second_half);
+	head=sort_free_list(head);
+	free_list_node* ret=0;
+	free_list_node** prev=&ret;
+	while(1)
+	{
+		if(second_half==0)
+		{
+			*prev=head;
+			break;
+		}
+		if(head==0)
+		{
+			*prev=second_half;
+			break;
+		}
+		if(head->size>second_half->size)
+		{
+			*prev=head;
+			prev=&head->next;
+			head=head->next;
+		}
+		else
+		{
+			*prev=second_half;
+			prev=&second_half->next;
+			second_half=second_half->next;
+		}
+	}
+	return ret;
 }
 
 static void* cleanup(void* _)
@@ -194,6 +257,12 @@ static void* cleanup(void* _)
 				}
 				to_insert=next;
 			}
+			free_list_node* sorted=sort_free_list(deleted);
+			spinlock_lock(&heap_lock);
+			deleted=global_heap;
+			global_heap=sorted;
+			spinlock_unlock(&heap_lock);
+			/*
 			if(deleted)
 			{
 				free_list_node** prev=&deleted;
@@ -223,6 +292,7 @@ static void* cleanup(void* _)
 					}
 				} while(head);
 			}
+			*/
 		}
 	}
 	return 0;
@@ -287,12 +357,54 @@ void* xmalloc(size_t _bytes)
 			}
 			ret->size=needed;
 			reserve->cache_size-=needed;
-			ret->reserve=reserve;
 			return ret->data;
 		}
 	}
 	if(unlikely(data+needed>data_end))
 	{
+		spinlock_lock(&heap_lock);
+		free_list_node* head=global_heap;
+		if(head&&head->size>=needed)
+		{
+			global_heap=head->next;
+			spinlock_unlock(&heap_lock);
+			size_t const remaining=head->size-needed;
+			if(remaining==0)
+			{
+				memblock* ret=(memblock*)head;
+				return ret->data;
+			}
+			else 
+			{
+				memblock* ret=(memblock*)head;
+				ret->size=needed;
+				free_list_node* left=(free_list_node*)((char*)head+needed);
+				left->size=remaining;
+				if(reserve->cache==0)
+				{
+					reserve->cache=left;
+					left->next=0;
+					reserve->cache_end=&left->next;
+				}
+				else
+				{
+					if(remaining<reserve->cache->size)
+					{
+						(*reserve->cache_end)=left;
+						left->next=0;
+						reserve->cache_end=&left->next;
+					}
+					else
+					{
+						free_list_node* next=reserve->cache;
+						reserve->cache=left;
+						left->next=next;
+					}
+				}
+				return ret->data;
+			}
+		}
+		spinlock_unlock(&heap_lock);
 		if(data)
 		{
 			char* last=(char*)(div_up((size_t)data,PAGE_SIZE)*PAGE_SIZE);
@@ -305,7 +417,6 @@ void* xmalloc(size_t _bytes)
 	}
 	memblock* ret=(memblock*)data;
 	ret->size=needed;
-	ret->reserve=reserve;
 	data+=needed;
 	return ret->data;
 }
