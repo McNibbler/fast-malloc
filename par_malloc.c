@@ -28,50 +28,48 @@ static size_t div_up(size_t xx,size_t yy)
 	return (xx+yy-1)/yy;
 }
 
-typedef struct free_list free_list;
-
 typedef struct free_list_node {
 	size_t size;
 	struct free_list_node* next;
 	//struct free_list_node* prev;
 } free_list_node;
 
-typedef struct free_list {
+typedef struct local_reserve {
 	size_t cache_size;
 	free_list_node* cache;
 	free_list_node** cache_end;
 	atomic_flag queue_lock;
-	free_list_node* queue; // singly linked
-} free_list;
+	free_list_node* queue; // singly linked, how the cache is given to the garbage collector
+} local_reserve;
 
-void spinlock_lock(atomic_flag* lock)
+static void spinlock_lock(atomic_flag* lock)
 {
 	while(atomic_flag_test_and_set_explicit(lock,memory_order_acquire));
 }
 
-void spinlock_unlock(atomic_flag* lock)
+static void spinlock_unlock(atomic_flag* lock)
 {
 	atomic_flag_clear_explicit(lock,memory_order_release);
 }
 
-typedef struct free_list_list {
-	free_list* list;
-	struct free_list_list* _Atomic next;
-} free_list_list;
+typedef struct reserve_list {
+	local_reserve* list;
+	struct reserve_list* _Atomic next;
+} reserve_list;
 
 typedef struct memblock {
 	size_t size;
-	free_list* reserve;
+	local_reserve* reserve;
 	char data[];
 } memblock;
 
-static free_list_list* _Atomic free_lists;
+static reserve_list* _Atomic free_lists;
 
-static void push_free_list(free_list_list* node)
+static void push_free_list(reserve_list* node)
 {
 	while(1)
 	{
-		free_list_list* head=atomic_load(&free_lists);
+		reserve_list* head=atomic_load(&free_lists);
 		node->next=head;
 		if(atomic_compare_exchange_strong(&free_lists,&head,node))
 		{
@@ -83,7 +81,7 @@ static void push_free_list(free_list_list* node)
 static pthread_mutex_t gc_mtx=PTHREAD_MUTEX_INITIALIZER;
 static pthread_cond_t gc_cv=PTHREAD_COND_INITIALIZER;
 static atomic_flag gc_init=ATOMIC_FLAG_INIT;
-static atomic_size_t awakenings;
+static atomic_size_t awakenings=ATOMIC_VAR_INIT(0);
 static pthread_t garbage_collector;
 
 static free_list_node* next_block(free_list_node const* bl)
@@ -116,9 +114,9 @@ static void* cleanup(void* _)
 			pthread_cond_wait(&gc_cv,&gc_mtx);
 		}
 		atomic_store_explicit(&awakenings,0,memory_order_release);
-		for(free_list_list* fll=atomic_load(&free_lists);fll;fll=fll->next)
+		for(reserve_list* fll=atomic_load(&free_lists);fll;fll=fll->next)
 		{
-			free_list* list=fll->list;
+			local_reserve* list=fll->list;
 			free_list_node* to_insert;
 			spinlock_lock(&list->queue_lock);
 			to_insert=list->queue;
@@ -230,10 +228,10 @@ static void* cleanup(void* _)
 	return 0;
 }
 
-static free_list* get_reserve()
+static local_reserve* get_reserve()
 {
-	static __thread free_list fl;
-	static __thread free_list_list fll;
+	static __thread local_reserve fl={0,0,0,ATOMIC_FLAG_INIT,0};
+	static __thread reserve_list fll={0,ATOMIC_VAR_INIT((void*)0)};
 	if(unlikely(fll.list==0))
 	{
 		fll.list=&fl;
@@ -261,7 +259,7 @@ void* xmalloc(size_t _bytes)
 	static __thread char* data=0;
 	static __thread char* data_end=0;
 	size_t const needed=div_up(_bytes+16,16)*16;
-	free_list* reserve=get_reserve();
+	local_reserve* reserve=get_reserve();
 	if(reserve->cache)
 	{
 		free_list_node* el=reserve->cache;
@@ -321,7 +319,7 @@ void xfree(void* ptr)
 		// put memory on thread local cache
 		// memory is more likely to be larger than previous allocations or the same size
 		// so putting it on the front is a good guess
-		free_list* reserve=get_reserve();
+		local_reserve* reserve=get_reserve();
 		size_t const size=start->size;
 		if(reserve->cache==0)
 		{
