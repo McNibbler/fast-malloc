@@ -193,23 +193,32 @@ static free_list_node* merge_free_lists_by_address(free_list_node* a,free_list_n
 		{
 			*prev=a;
 			prev=&a->next;
-			if(coelescable(a,b))
-			{
-				a->size+=b->size;
-				b=b->next;
-			}
 			a=a->next;
 		}
 		else
 		{
 			*prev=b;
 			prev=&b->next;
-			if(coelescable(b,a))
-			{
-				b->size+=a->size;
-				a=a->next;
-			}
 			b=b->next;
+		}
+	}
+	if(ret)
+	{
+		free_list_node* head=ret;
+		free_list_node* next=head->next;
+		while(next)
+		{
+			if(coelescable(head,next))
+			{
+				head->size+=next->size;
+				head->next=next->next;
+				next=head->next;
+			}
+			else
+			{
+				head=next;
+				next=next->next;
+			}
 		}
 	}
 	return ret;
@@ -488,7 +497,7 @@ void xfree(void* ptr)
 		start->next=reserve->cache;
 		reserve->cache=start;
 		reserve->cache_size+=size;
-		size_t const CACHE_LIMIT=PAGE_SIZE;
+		size_t const CACHE_LIMIT=20*PAGE_SIZE;
 		if(reserve->cache_size>=CACHE_LIMIT)
 		{
 			spinlock_lock(&reserve->queue_lock);
