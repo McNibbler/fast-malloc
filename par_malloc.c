@@ -13,6 +13,7 @@
 #define unlikely(x)    __builtin_expect(!!(x), 0) 
 
 // This has the Nat Tuck seal of "not actually a stupid idea"
+// Can be interpreted as a simplified version of Google's TCMalloc
 // Each thread allocates a block of memory to take from
 // On freeing, memory segments are consed to the front of 
 // Thread-local free list, if the cache grows too big
