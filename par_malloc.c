@@ -95,9 +95,13 @@ static int coelescable(free_list_node const* a,free_list_node const* b)
 	return (next_block(a)==b);
 }
 
+enum constants {
+	PAGE_SIZE=4096
+};
+
 static int page_aligned(void* addr)
 {
-	return (((size_t)addr)%4096)==0;
+	return (((size_t)addr)%PAGE_SIZE)==0;
 }
 
 static void* cleanup(void* _)
@@ -194,8 +198,8 @@ static void* cleanup(void* _)
 				do
 				{
 					size_t const size=deleted->size;
-					size_t const num_pages=size/4096;
-					size_t const num_bytes=num_pages*4096;
+					size_t const num_pages=size/PAGE_SIZE;
+					size_t const num_bytes=num_pages*PAGE_SIZE;
 					if(num_bytes==size)
 					{
 						free_list_node* next=head->next;
@@ -288,7 +292,7 @@ void* xmalloc(size_t _bytes)
 	{
 		if(data)
 		{
-			char* last=(char*)div_up((size_t)data,4096);
+			char* last=(char*)(div_up((size_t)data,PAGE_SIZE)*PAGE_SIZE);
 			munmap(last,data_end-last);
 		}
 		size_t const block_size=0x100000ULL;
@@ -318,7 +322,7 @@ void xfree(void* ptr)
 		}
 		start->next=reserve->cache;
 		reserve->cache=start;
-		size_t const CACHE_LIMIT=4096;
+		size_t const CACHE_LIMIT=PAGE_SIZE;
 		if(reserve->cache_size>=CACHE_LIMIT)
 		{
 			spinlock_lock(&reserve->queue_lock);
