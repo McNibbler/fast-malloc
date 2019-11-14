@@ -286,17 +286,7 @@ static void* cleanup(void* _)
 			to_insert=sort_free_list_by_address(to_insert);
 			deleted=merge_free_lists_by_address(to_insert,deleted);
 		}
-		printf("xxxxxxxxxxxxxx\n");
-		for(free_list_node* h=deleted;h;h=h->next)
-		{
-			printf("%x %ld\n",h,h->size);
-		}
 		free_list_node* sorted=sort_free_list_by_size(deleted);
-		printf("yyyyyyyyyyyyyyy\n");
-		for(free_list_node* h=sorted;h;h=h->next)
-		{
-			printf("%x %ld\n",h,h->size);
-		}
 		spinlock_lock(&heap_lock);
 		deleted=global_heap;
 		global_heap=sorted;
