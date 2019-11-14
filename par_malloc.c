@@ -83,6 +83,7 @@ static void push_free_list(free_list_list* node)
 static pthread_mutex_t gc_mtx=PTHREAD_MUTEX_INITIALIZER;
 static pthread_cond_t gc_cv=PTHREAD_COND_INITIALIZER;
 static atomic_flag gc_init=ATOMIC_FLAG_INIT;
+static atomic_size_t awakenings;
 static pthread_t garbage_collector;
 
 static free_list_node* next_block(free_list_node const* bl)
@@ -110,7 +111,11 @@ static void* cleanup(void* _)
 	while(1)
 	{
 		pthread_mutex_lock(&gc_mtx);
-		pthread_cond_wait(&gc_cv,&gc_mtx);
+		while(atomic_load_explicit(&awakenings,memory_order_acquire)==0)
+		{
+			pthread_cond_wait(&gc_cv,&gc_mtx);
+		}
+		atomic_store_explicit(&awakenings,0,memory_order_release);
 		for(free_list_list* fll=atomic_load(&free_lists);fll;fll=fll->next)
 		{
 			free_list* list=fll->list;
@@ -295,7 +300,7 @@ void* xmalloc(size_t _bytes)
 			char* last=(char*)(div_up((size_t)data,PAGE_SIZE)*PAGE_SIZE);
 			munmap(last,data_end-last);
 		}
-		size_t const block_size=0x100000ULL;
+		size_t const block_size=64*PAGE_SIZE;
 		size_t const to_alloc=block_size>needed?block_size:needed;
 		data=mmap(0,to_alloc,PROT_READ|PROT_WRITE,MAP_ANONYMOUS|MAP_PRIVATE,-1,0);
 		data_end=data+to_alloc;
@@ -314,6 +319,8 @@ void xfree(void* ptr)
 		free_list_node* start=(free_list_node*)((char*)ptr-16);
 		memblock* block=(memblock*)start;
 		// put memory on thread local cache
+		// memory is more likely to be larger than previous allocations or the same size
+		// so putting it on the front is a good guess
 		free_list* reserve=get_reserve();
 		size_t const size=start->size;
 		if(reserve->cache==0)
@@ -329,6 +336,7 @@ void xfree(void* ptr)
 			(*reserve->cache_end)=reserve->queue;
 			reserve->queue=reserve->cache;
 			spinlock_unlock(&reserve->queue_lock);
+			atomic_fetch_add_explicit(&awakenings,1,memory_order_release);
 			pthread_cond_signal(&gc_cv);
 			reserve->cache=0;
 			reserve->cache_end=&reserve->cache;
