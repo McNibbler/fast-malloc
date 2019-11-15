@@ -102,7 +102,7 @@ static void push_local_reserve(reserve_list* node)
 ////////// Garbage collection //////////
 
 // Global heap for adding freed memory to so it can be collected by the garbage collector
-static free_list_node* global_heap=NULL;
+static free_list_node* global_heap=0;
 static atomic_flag heap_lock=ATOMIC_FLAG_INIT;	// For the spinlock
 
 // Garbage collector initializations
@@ -112,10 +112,15 @@ static atomic_flag gc_init=ATOMIC_FLAG_INIT;
 static atomic_size_t awakenings=ATOMIC_VAR_INIT(0);
 static pthread_t garbage_collector;
 
+static free_list_node* offset_block(free_list_node const* bl,size_t offset)
+{
+	return (free_list_node*)(((char*)bl)+offset);
+}
+
 // Finds the next block in the free list given a starting node
 static free_list_node* next_block(free_list_node const* bl)
 {
-	return (free_list_node*)(((char*)bl)+bl->size);
+	return offset_block(bl,bl->size);
 }
 
 // Returns true if the free list noes are adjacent to one another
@@ -520,7 +525,7 @@ static size_t fix_size(size_t _bytes)
 	return div_up(_bytes+16,16)*16;
 }
 
-// Allocates memory from the global cache if there is some available
+// Allocates memory from the local cache if there is some available
 static void* take_from_cache(local_reserve* reserve,size_t const needed)
 {
 	// If there actually is a cache available
@@ -535,10 +540,10 @@ static void* take_from_cache(local_reserve* reserve,size_t const needed)
 			free_list_node* next=el->next;
 			memblock* ret=(memblock*)el;
 			size_t const remaining=el_size-needed;
-
 			// Splits the block and puts it back in fl if there are enough bytes
 			if(remaining<MIN_ALLOC_SIZE)
 			{
+				reserve->cache_size-=el_size;
 				reserve->cache=next;
 				if(next==0)
 				{
@@ -549,15 +554,17 @@ static void* take_from_cache(local_reserve* reserve,size_t const needed)
 			// Finds space if there isn't anything available in this node
 			else
 			{
-				free_list_node* new_node=(free_list_node*)((char*)el+needed);
+				ret->size=needed;
+				reserve->cache_size-=needed;
+				free_list_node* new_node=offset_block(el,needed);
 				new_node->size=remaining;
 
 				// If you've reached the end of the free list
-				if(!next)
+				if(next==0)
 				{
 					reserve->cache=new_node;
 					reserve->cache_end=&new_node->next;
-					new_node->next=NULL;
+					new_node->next=0;
 				}
 				else
 				{
@@ -565,6 +572,7 @@ static void* take_from_cache(local_reserve* reserve,size_t const needed)
 					{
 						(*reserve->cache_end)=new_node;
 						reserve->cache=next;
+						reserve->cache_end=&new_node->next;
 					}
 					else
 					{
@@ -574,24 +582,38 @@ static void* take_from_cache(local_reserve* reserve,size_t const needed)
 				}
 			}
 
-			// Returns the pointer to the new space
-			ret->size=needed;
-			reserve->cache_size-=needed;
+			size_t const CACHE_LIMIT=20*PAGE_SIZE;
+
+			// For frees of large allocations
+			if(reserve->cache_size>=CACHE_LIMIT)
+			{
+				spinlock_lock(&reserve->queue_lock);
+				(*reserve->cache_end)=reserve->queue;
+				reserve->queue=reserve->cache;
+				spinlock_unlock(&reserve->queue_lock);
+				// Awakens the garbage collector thread
+				atomic_fetch_add_explicit(&awakenings,1,memory_order_release);
+				pthread_cond_signal(&gc_cv);
+				reserve->cache=0;
+				reserve->cache_end=&reserve->cache;
+				reserve->cache_size=0;
+			}
+
 			return ret->data;
 		}
 	}
 
 	// Returns null if no allocable space
-	return NULL;
+	return 0;
 }
 
 static void insert_into_cache(local_reserve* reserve,free_list_node* node,size_t const block_size)
 {
 	reserve->cache_size+=block_size;
-	if(reserve->cache==NULL)
+	if(reserve->cache==0)
 	{
 		reserve->cache=node;
-		node->next=NULL;
+		node->next=0;
 		reserve->cache_end=&node->next;
 	}
 	else
@@ -599,7 +621,7 @@ static void insert_into_cache(local_reserve* reserve,free_list_node* node,size_t
 		if(block_size<reserve->cache->size)
 		{
 			(*reserve->cache_end)=node;
-			node->next=NULL;
+			node->next=0;
 			reserve->cache_end=&node->next;
 		}
 		else
@@ -638,7 +660,7 @@ static void* take_from_global_heap(local_reserve* reserve,size_t const needed)
 			// Initializes the returned memory
 			memblock* ret=(memblock*)head;
 			ret->size=needed;
-			free_list_node* left=(free_list_node*)((char*)head+needed);
+			free_list_node* left=offset_block(head,needed);
 			left->size=remaining;
 			insert_into_cache(reserve,left,remaining);
 			return ret->data;
@@ -647,7 +669,7 @@ static void* take_from_global_heap(local_reserve* reserve,size_t const needed)
 
 	// Returns a null pointer if you can't take from the heap
 	spinlock_unlock(&heap_lock);
-	return NULL;
+	return 0;
 }
 
 /////////////////////////
@@ -734,23 +756,6 @@ void xfree(void* ptr)
 		local_reserve* reserve=get_reserve();
 		size_t const size=start->size;
 		insert_into_cache(reserve,start,size);
-
-		size_t const CACHE_LIMIT=20*PAGE_SIZE;
-
-		// For frees of large allocations
-		if(reserve->cache_size>=CACHE_LIMIT)
-		{
-			spinlock_lock(&reserve->queue_lock);
-			(*reserve->cache_end)=reserve->queue;
-			reserve->queue=reserve->cache;
-			spinlock_unlock(&reserve->queue_lock);
-			// Awakens the garbage collector thread
-			atomic_fetch_add_explicit(&awakenings,1,memory_order_release);
-			pthread_cond_signal(&gc_cv);
-			reserve->cache=0;
-			reserve->cache_end=&reserve->cache;
-			reserve->cache_size=0;
-		}
 	}
 	// Do nothing if freeing null
 }
