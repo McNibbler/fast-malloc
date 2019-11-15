@@ -455,10 +455,14 @@ static void* cleanup(void* _)
 	while (1)
 	{
 		//  Awakens the garbage collector
-		pthread_mutex_lock(&gc_mtx);
-		while (atomic_load_explicit(&awakenings, memory_order_acquire) == 0)
+		if(atomic_load_explicit(&awakenings, memory_order_acquire) == 0)
 		{
-			pthread_cond_wait(&gc_cv, &gc_mtx);
+			pthread_mutex_lock(&gc_mtx);
+			while(atomic_load_explicit(&awakenings,memory_order_acquire) == 0)
+			{
+				pthread_cond_wait(&gc_cv,&gc_mtx);
+			}
+			pthread_mutex_unlock(&gc_mtx);
 		}
 		// Cleans up every free list in the thread reserves
 		atomic_store_explicit(&awakenings, 0, memory_order_release);
