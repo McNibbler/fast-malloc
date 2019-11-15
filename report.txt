@@ -7,25 +7,26 @@
 Results
 -------
 
-List
---------------------------------
-| System | HW08  | Fast Malloc |
---------------------------------
-| 17ms   | 754ms | 6ms         |
---------------------------------
+ivec: input 10000
+---------------------------------
+| System | HW08   | Fast Malloc |
+---------------------------------
+| 55ms   | 5313ms | 46ms        |
+---------------------------------
 
-iVec
---------------------------------
-| System | HW08  | Fast Malloc |
---------------------------------
-| 5ms    | 36ms  | 4ms         |
---------------------------------
+list: input 1000
+---------------------------------
+| System | HW08   | Fast Malloc |
+---------------------------------
+| 24ms   | 667ms  | 7ms         |
+---------------------------------
 
-OS Information (CCIS Server)
+OS Information
 ----------------------------
-Operating System: CentOS 7
-Processor: Intel Xeon Gold 5118
-RAM: 187GB
+Windows 10/VM Debian 10
+Intel(R) Core(TM) i7-6700HQ CPU @ 2.60GHz
+4 Physical Cores, 8 Logical Cores
+16 GB RAM, 8169920 kB allocated to VM
 
 Strategy and Results
 --------------------
@@ -52,9 +53,15 @@ into a queue to get collected later. For our design, we had an immediately avail
 locally to the thread in its own free list, but when that cache grew to be large, it would instead
 summon the garbage collector to coalesce that would instead add to the global heap. As for the
 actual allocation, we would first take from the free list that would be in the thread's local
-cache, but if there was none available then we would grab from the large global heap of memory.
-Only if that large space got filled would we consider calling a new mmap. This design proved to be
-slightly simpler, implementation wise, than our first attempt, and ended up being considerably
-faster than the system malloc for the provided tests.
+cache (free list and data block) but if there was none available then we would grab from the large 
+global heap of memory. Only if that large space got filled would we consider calling a new mmap.
+This design proved to be slightly simpler, implementation wise, than our first attempt, and ended 
+up being faster than the system malloc for the provided tests.
+
+Our allocator is significantly faster than malloc for lists because the allocation size for
+lists is always the same. No colescing is done immediately, so xmalloc can just quickly
+pop off a 32 byte block off the cache with no further work. We have no explanation for why
+our malloc is extremely close but usually slightly faster than sysmalloc.
+
 
 
