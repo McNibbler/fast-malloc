@@ -27,7 +27,7 @@
 #include "xmalloc.h"
 
 // Macros for likelihood builtins for minor comparison optimizations
-// from https://www.geeksforgeeks.org / branch - prediction - macros - in - gcc/
+// from https://www.geeksforgeeks.org/branch-prediction-macros-in-gcc/
 #define likely(x)      __builtin_expect(!!(x), 1) 
 #define unlikely(x)    __builtin_expect(!!(x), 0) 
 
