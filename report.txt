@@ -61,7 +61,7 @@ up being faster than the system malloc for the provided tests.
 Our allocator is significantly faster than malloc for lists because the allocation size for
 lists is always the same. No colescing is done immediately, so xmalloc can just quickly
 pop off a 32 byte block off the cache with no further work. We have no explanation for why
-our malloc is extremely close but usually slightly faster than sysmalloc.
+our malloc is extremely close to but usually slightly faster than sysmalloc for ivec.
 
 
 
