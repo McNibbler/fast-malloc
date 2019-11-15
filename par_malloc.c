@@ -50,7 +50,7 @@ typedef struct free_list_node {
 // A block of memory to be used
 typedef struct memblock {
 	size_t size;
-	size_t _padding;	// Unused, keeps same alignment as freelist
+	size_t _padding;	// for 16 byte alignment
 	char data[];		// All the actually allocated data goes in here as bytes
 } memblock;
 
@@ -268,7 +268,7 @@ static merge_result merge_free_lists_by_address(merge_result a, merge_result b)
 		if (b.head)
 		{
 			// short circuit one range being completely lower than the other
-			for (int i = 0; i < 2;++i)
+			for (int i = 0; i < 2; ++i)
 			{
 				if (a.last < b.head)
 				{
@@ -284,6 +284,7 @@ static merge_result merge_free_lists_by_address(merge_result a, merge_result b)
 					}
 					else
 					{
+						a.last->next = b.head;
 						a.last = b.last;
 					}
 					return a;
@@ -568,24 +569,6 @@ static void* take_from_cache(local_reserve* reserve, size_t const needed)
 					}
 				}
 			}
-
-			size_t const CACHE_LIMIT = 20 * PAGE_SIZE;
-
-			// For frees of large allocations
-			if (reserve->cache_size >= CACHE_LIMIT)
-			{
-				spinlock_lock(&reserve->queue_lock);
-				(*reserve->cache_end) = reserve->queue;
-				reserve->queue = reserve->cache;
-				spinlock_unlock(&reserve->queue_lock);
-				// Awakens the garbage collector thread
-				atomic_fetch_add_explicit(&awakenings, 1, memory_order_release);
-				pthread_cond_signal(&gc_cv);
-				reserve->cache = 0;
-				reserve->cache_end = &reserve->cache;
-				reserve->cache_size = 0;
-			}
-
 			return ret->data;
 		}
 	}
@@ -618,6 +601,23 @@ static void insert_into_cache(local_reserve* reserve, free_list_node* node, size
 			reserve->cache = node;
 			node->next = next;
 		}
+	}
+
+	size_t const CACHE_LIMIT = 20 * PAGE_SIZE;
+
+	// For frees of large allocations
+	if (reserve->cache_size >= CACHE_LIMIT)
+	{
+		spinlock_lock(&reserve->queue_lock);
+		(*reserve->cache_end) = reserve->queue;
+		reserve->queue = reserve->cache;
+		spinlock_unlock(&reserve->queue_lock);
+		// Awakens the garbage collector thread
+		atomic_fetch_add_explicit(&awakenings, 1, memory_order_release);
+		pthread_cond_signal(&gc_cv);
+		reserve->cache = 0;
+		reserve->cache_end = &reserve->cache;
+		reserve->cache_size = 0;
 	}
 }
 
