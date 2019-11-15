@@ -8,24 +8,24 @@ Results
 -------
 
 List
----------------------------------
-| System | HW08   | Fast Malloc |
----------------------------------
-| 62ms   | 1175ms | 37ms        |
----------------------------------
+--------------------------------
+| System | HW08  | Fast Malloc |
+--------------------------------
+| 17ms   | 754ms | 6ms         |
+--------------------------------
 
 iVec
----------------------------------
-| System | HW08   | Fast Malloc |
----------------------------------
-| 38ms   | 79ms   | 31ms        |
----------------------------------
+--------------------------------
+| System | HW08  | Fast Malloc |
+--------------------------------
+| 5ms    | 36ms  | 4ms         |
+--------------------------------
 
-OS Information
---------------
-Operating System: Windows 10 with WSL (Ubuntu 18.04.1)
-Processor: Intel i7-8750H
-RAM: 16GB
+OS Information (CCIS Server)
+----------------------------
+Operating System: CentOS 7
+Processor: Intel Xeon Gold 5118
+RAM: 187GB
 
 Strategy and Results
 --------------------
@@ -35,7 +35,7 @@ free lists of data at various buckets that would represent the size of each allo
 level's free list. With this, we would have the benefit of not needing to scan to find available
 spaces that would fit the size of the allocation. Regrettably, this proved to be very annoying to
 implement, and after a few days of attempting and reaching many roadblocks, we gave up on this
-approach. It's remains can be seen in the file "binary_failure.c.old" for your viewing pleasure.
+approach. 
 
 Our current approach initially started as a joke, but proved to actually be less stupid of an idea
 than initially anticipated. Initially, we joked that wwe could make a really fast allocator if we

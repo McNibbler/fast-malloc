@@ -143,17 +143,18 @@ typedef struct merge_result {
 	free_list_node* last; // garbage if head is null, else ptr to last element of list
 } merge_result;
 
-// Merges free list nodes together
-static merge_result merge_free_lists_by_size(merge_result a,merge_result b)
+// Merges two free lists together based on size
+static merge_result merge_free_lists_by_size(merge_result a, merge_result b)
 {
 	if(a.head)
 	{
 		if(b.head)
 		{
-			if(a.last->size>=b.head->size)
+			// Compares sizes and inserts to the growing return value prioritizing largest size
+			if(a.last->size >= b.head->size)
 			{
-				a.last->next=b.head;
-				a.last=b.last;
+				a.last->next = b.head;
+				a.last = b.last;
 				return a;
 			}
 		}
@@ -166,10 +167,11 @@ static merge_result merge_free_lists_by_size(merge_result a,merge_result b)
 	{
 		if(a.head)
 		{
-			if(b.last->size>=a.head->size)
+			// Compares sizes and inserts to the growing return value prioritizing largest size
+			if(b.last->size >= a.head->size)
 			{
-				b.last->next=a.head;
-				b.last=a.last;
+				b.last->next = a.head;
+				b.last = a.last;
 				return b;
 			}
 		}
@@ -180,41 +182,45 @@ static merge_result merge_free_lists_by_size(merge_result a,merge_result b)
 	}
 	else
 	{
-		merge_result ret={0,0};
+		merge_result ret={0, 0};
 		return ret;
 	}
-	free_list_node head={0,0};
-	free_list_node* prev=&head;
-	free_list_node* ahead=a.head;
-	free_list_node* bhead=b.head;
+	
+	// If not at one of the heads, continue merging
+	free_list_node head = {0, 0};
+	free_list_node* prev = &head;
+	free_list_node* ahead = a.head;
+	free_list_node* bhead = b.head;
 	while(1)
 	{
-		if(ahead->size>bhead->size)
+		if(ahead->size > bhead->size)
 		{
-			prev->next=ahead;
-			prev=ahead;
-			ahead=ahead->next;
+			prev->next = ahead;
+			prev = ahead;
+			ahead = ahead->next;
 		}
 		else
 		{
-			prev->next=bhead;
-			prev=bhead;
-			bhead=bhead->next;
+			prev->next = bhead;
+			prev = bhead;
+			bhead = bhead->next;
 		}
-		if(ahead==0)
+
+		// Base case reached, break and return
+		if(!ahead)
 		{
-			prev->next=bhead;
-			prev=b.last;
+			prev->next = bhead;
+			prev = b.last;
 			break;
 		}
-		if(bhead==0)
+		if(!bhead)
 		{
-			prev->next=ahead;
-			prev=a.last;
+			prev->next = ahead;
+			prev = a.last;
 			break;
 		}
 	}
-	merge_result ret={head.next,prev};
+	merge_result ret = {head.next,prev};
 	return ret;
 }
 
@@ -222,68 +228,70 @@ static merge_result merge_free_lists_by_size(merge_result a,merge_result b)
 static merge_result sort_free_list_by_size(free_list_node* head)
 {
 	// Base case, 1 or 0 elements
-	if(head==0||head->next==0)
+	if(!head || !head->next)
 	{
-		merge_result ret={head,head};
+		merge_result ret = {head, head};
 		return ret;
 	}
 
 	// 2 element list
-	free_list_node* next=head->next;
-	if(next->next==0)
+	free_list_node* next = head->next;
+	if(!next->next)
 	{
-		if(head->size<next->size)
+		if(head->size < next->size)
 		{
-			next->next=head;
-			head->next=0;
-			merge_result ret={next,head};
+			next->next = head;
+			head->next = NULL;
+			merge_result ret = {next, head};
 			return ret;
 		}
 		else
 		{
-			merge_result ret={head,next};
+			merge_result ret = {head, next};
 			return ret;
 		}
 	}
 
 	//split list
-	free_list_node* before_second_half=next;
-	free_list_node* far=next->next;
-	while(far&&(far=far->next))
+	free_list_node* before_second_half = next;
+	free_list_node* far = next->next;
+	while(far && (far = far->next))
 	{
-		far=far->next;
-		before_second_half=before_second_half->next;
+		far = far->next;
+		before_second_half = before_second_half->next;
 	}
 
-	free_list_node* second_half=before_second_half->next;
-	before_second_half->next=0;
-	merge_result s1=sort_free_list_by_size(head);
-	merge_result s2=sort_free_list_by_size(second_half);
+	free_list_node* second_half = before_second_half->next;
+	before_second_half->next = NULL;
+	merge_result s1 = sort_free_list_by_size(head);
+	merge_result s2 = sort_free_list_by_size(second_half);
 	// Linear recombination step
-	return merge_free_lists_by_size(s1,s2);
+	return merge_free_lists_by_size(s1, s2);
 }
 
-// Merges the free list based on the address of the nodes
-static merge_result merge_free_lists_by_address(merge_result a,merge_result b)
+// Merges two free lists together based on which nodes show earliest in memory
+static merge_result merge_free_lists_by_address(merge_result a, merge_result b)
 {
 	if(a.head)
 	{
 		if(b.head)
 		{
-			if(a.last<b.head)
+			// Compares pointers and inserts to the growing return value prioritizing earliest node
+			if(a.last < b.head)
 			{
-				if(coelescable(a.last,b.head))
+				// Coalesces the blocks if possible
+				if(coelescable(a.last, b.head))
 				{
-					a.last->size+=b.head->size;
-					a.last->next=b.head->next;
-					if(b.head->next!=0)
+					a.last->size += b.head->size;
+					a.last->next = b.head->next;
+					if(b.head->next)
 					{
-						a.last=b.last;
+						a.last = b.last;
 					}
 				}
 				else
 				{
-					a.last=b.last;
+					a.last = b.last;
 				}
 				return a;
 			}
@@ -297,20 +305,22 @@ static merge_result merge_free_lists_by_address(merge_result a,merge_result b)
 	{
 		if(a.head)
 		{
-			if(b.last<a.head)
+			// Compares pointers and inserts to the growing return value prioritizing earliest node
+			if(b.last < a.head)
 			{
-				if(coelescable(b.last,a.head))
+				// Coalesces the blocks if possible
+				if(coelescable(b.last, a.head))
 				{
-					b.last->size+=a.head->size;
-					b.last->next=a.head->next;
-					if(a.head->next!=0)
+					b.last->size += a.head->size;
+					b.last->next = a.head->next;
+					if(a.head->next)
 					{
-						b.last=a.last;
+						b.last = a.last;
 					}
 				}
 				else
 				{
-					b.last=a.last;
+					b.last = a.last;
 				}
 				return b;
 			}
@@ -322,77 +332,80 @@ static merge_result merge_free_lists_by_address(merge_result a,merge_result b)
 	}
 	else
 	{
-		merge_result ret={0,0};
+		merge_result ret = {0, 0};
 		return ret;
 	}
+	
+	// If not at one of the heads, continue merging, coalescing where possible
 	free_list_node head={0,0};
 	free_list_node* prev=&head;
 	free_list_node* ahead=a.head;
 	free_list_node* bhead=b.head;
 	while(1)
 	{
-		if(ahead<bhead)
+		if(ahead < bhead)
 		{
-			if(coelescable(prev,ahead))
+			if(coelescable(prev, ahead))
 			{
-				prev->size+=ahead->size;
+				prev->size += ahead->size;
 			}
 			else
 			{
-				prev->next=ahead;
-				prev=ahead;
+				prev->next = ahead;
+				prev = ahead;
 			}
-			ahead=ahead->next;
+			ahead = ahead->next;
 		}
 		else
 		{
-			if(coelescable(prev,bhead))
+			if(coelescable(prev, bhead))
 			{
-				prev->size+=bhead->size;
+				prev->size += bhead->size;
 			}
 			else
 			{
-				prev->next=bhead;
-				prev=bhead;
+				prev->next = bhead;
+				prev = bhead;
 			}
-			bhead=bhead->next;
+			bhead = bhead->next;
 		}
-		if(ahead==0)
+		// Base case reached, break and return
+		if(!ahead)
 		{
-			if(coelescable(prev,bhead))
+			if(coelescable(prev, bhead))
 			{
-				prev->size+=bhead->size;
-				prev->next=bhead->next;
+				prev->size += bhead->size;
+				prev->next = bhead->next;
 			}
 			else
 			{
-				prev->next=bhead;
+				prev->next = bhead;
 			}
 			if(prev->next)
 			{
-				prev=b.last;
+				prev = b.last;
 			}
 			break;
 		}
-		if(bhead==0)
+		if(!bhead)
 		{
-			if(coelescable(prev,ahead))
+			if(coelescable(prev, ahead))
 			{
-				prev->size+=ahead->size;
-				prev->next=ahead->next;
+				prev->size += ahead->size;
+				prev->next = ahead->next;
 			}
 			else
 			{
-				prev->next=ahead;
+				prev->next = ahead;
 			}
 			if(prev->next)
 			{
-				prev=a.last;
+				prev = a.last;
 			}
 			break;
 		}
 	}
-	merge_result ret={head.next,prev};
+	merge_result ret = {head.next, prev};
 	return ret;
 }
 
@@ -400,62 +413,64 @@ static merge_result merge_free_lists_by_address(merge_result a,merge_result b)
 static merge_result sort_free_list_by_address(free_list_node* head)
 {
 	// Base Case, 0 or 1 element
-	if(head==0||head->next==0)
+	if(!head || !head->next)
 	{
-		merge_result ret={head,head};
+		merge_result ret = {head, head};
 		return ret;
 	}
 
 	// 2 element case
-	free_list_node* next=head->next;
-	if(next->next==0)
+	free_list_node* next = head->next;
+	if(!next->next)
 	{
-		if(head<next)
+		if(head < next)
 		{
-			if(coelescable(head,next))
+			if(coelescable(head, next))
 			{
-				head->size+=next->size;
-				head->next=0;
-				merge_result ret={head,head};
+				head->size += next->size;
+				head->next = NULL;
+				merge_result ret = {head, head};
 				return ret;
 			}
 			else
 			{
-				merge_result ret={head,next};
+				merge_result ret = {head, next};
 				return ret;
 			}
 		}
 		else
 		{
-			if(coelescable(next,head))
+			if(coelescable(next, head))
 			{
-				next->size+=head->size;
-				next->next=0;
-				merge_result ret={next,next};
+				next->size += head->size;
+				next->next = NULL;
+				merge_result ret = {next, next};
 				return ret;
 			}
 			else
 			{
-				next->next=head;
-				head->next=0;
-				merge_result ret={next,head};
+				next->next = head;
+				head->next = NULL;
+				merge_result ret = {next,head};
 				return ret;
 			}
 		}
 	}
-	free_list_node* before_second_half=head;
-	free_list_node* far=next->next;
-	while(far&&(far=far->next))
+
+	// Splits the list
+	free_list_node* before_second_half = head;
+	free_list_node* far = next->next;
+	while(far && (far = far->next))
 	{
-		far=far->next;
-		before_second_half=before_second_half->next;
+		far = far->next;
+		before_second_half = before_second_half->next;
 	}
-	free_list_node* second_half=before_second_half->next;
-	before_second_half->next=0;
-	merge_result s1=sort_free_list_by_address(second_half);
-	merge_result s2=sort_free_list_by_address(head);
+	free_list_node* second_half = before_second_half->next;
+	before_second_half->next = NULL;
+	merge_result s1 = sort_free_list_by_address(second_half);
+	merge_result s2 = sort_free_list_by_address(head);
 	// Linear recombination step
-	return merge_free_lists_by_address(s1,s2);
+	return merge_free_lists_by_address(s1, s2);
 }
 
 ////////// Garbage collection thread //////////
@@ -528,7 +543,7 @@ static size_t fix_size(size_t _bytes)
 // Allocates memory from the local cache if there is some available
 static void* take_from_cache(local_reserve* reserve,size_t const needed)
 {
-	// If there actually is a cache available
+	// If there actually is a cache available in this thread's reserve
 	if(reserve->cache)
 	{
 		free_list_node* el=reserve->cache;
